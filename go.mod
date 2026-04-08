@@ -8,7 +8,7 @@ require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.2
 	charm.land/lipgloss/v2 v2.0.2
-	github.com/robinovitch61/viewport v0.11.2
+	github.com/robinovitch61/viewport v0.11.3
 )
 
 require (
@@ -30,5 +30,3 @@ require (
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 )
-
-replace github.com/robinovitch61/viewport => ../viewport
