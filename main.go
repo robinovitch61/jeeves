@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/robinovitch61/viewport/filterableviewport"
@@ -131,21 +132,27 @@ type model struct {
 	fullFV    *filterableviewport.Model[contentLine]
 
 	ready           bool
+	loading         bool
+	spinner         spinner.Model
 	width, height   int
 	lastSelectedIdx int
 	resumeSessionID string
 }
 
 func initialModel(searchTerm string) model {
+	s := spinner.New(spinner.WithSpinner(spinner.Dot))
+	s.Style = dimStyle
 	return model{
 		mode:            viewModeList,
 		searchTerm:      searchTerm,
 		lastSelectedIdx: -1,
+		loading:         true,
+		spinner:         s,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return searchCmd(m.searchTerm)
+	return tea.Batch(m.spinner.Tick, searchCmd(m.searchTerm))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -154,6 +161,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case searchResultsMsg:
+		m.loading = false
 		m.conversations = msg.conversations
 		m.rows = buildRows(m.conversations, m.listWidth())
 		if m.ready {
@@ -192,6 +200,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case viewModeFullscreen:
 			return m.updateFullscreenMode(msg)
 		}
+
+	case spinner.TickMsg:
+		if m.loading {
+			m.spinner, cmd = m.spinner.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -290,8 +305,8 @@ func (m *model) updateFullscreenMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m model) View() tea.View {
 	var content string
-	if !m.ready {
-		content = "Searching..."
+	if !m.ready || m.loading {
+		content = m.spinner.View() + " Searching..."
 	} else {
 		switch m.mode {
 		case viewModeList:
