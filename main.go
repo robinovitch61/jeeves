@@ -384,7 +384,7 @@ func (m *model) initViewports() {
 		filterableviewport.WithStyles[previewLine](filterableviewport.DefaultStyles()),
 		filterableviewport.WithEmptyText[previewLine](""),
 		filterableviewport.WithHorizontalPad[previewLine](50),
-		filterableviewport.WithVerticalPad[previewLine](10),
+		filterableviewport.WithVerticalPad[previewLine](1000000), // ensure centered when possible
 	)
 	m.previewFV.SetWrapText(true)
 	m.previewFV.SetSelectionEnabled(false)
