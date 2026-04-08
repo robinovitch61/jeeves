@@ -137,6 +137,7 @@ type model struct {
 	width, height   int
 	lastSelectedIdx int
 	resumeSessionID string
+	resumeCwd       string
 }
 
 func initialModel(searchTerm string) model {
@@ -265,6 +266,7 @@ func (m *model) updateListMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, appKeyMap.resume):
 		if sel := m.listFV.GetSelectedItem(); sel != nil {
 			m.resumeSessionID = sel.conv.sessionID
+			m.resumeCwd = sel.conv.cwd
 			return m, tea.Quit
 		}
 	}
@@ -811,14 +813,28 @@ func main() {
 	}
 
 	// check if we need to resume a conversation
-	finalModel, ok := result.(model)
-	if ok && finalModel.resumeSessionID != "" {
+	var resumeSessionID, resumeCwd string
+	switch fm := result.(type) {
+	case model:
+		resumeSessionID = fm.resumeSessionID
+		resumeCwd = fm.resumeCwd
+	case *model:
+		resumeSessionID = fm.resumeSessionID
+		resumeCwd = fm.resumeCwd
+	}
+	if resumeSessionID != "" {
+		if resumeCwd != "" {
+			if err := os.Chdir(resumeCwd); err != nil {
+				fmt.Fprintf(os.Stderr, "chdir to %s: %v\n", resumeCwd, err)
+				os.Exit(1)
+			}
+		}
 		binary, err := exec.LookPath("claude")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "claude not found: %v\n", err)
 			os.Exit(1)
 		}
-		if err := syscall.Exec(binary, []string{"claude", "--resume", finalModel.resumeSessionID}, os.Environ()); err != nil { //nolint:gosec // intentional: exec into claude with user-selected session
+		if err := syscall.Exec(binary, []string{"claude", "--resume", resumeSessionID}, os.Environ()); err != nil { //nolint:gosec // intentional: exec into claude with user-selected session
 			fmt.Fprintf(os.Stderr, "exec error: %v\n", err)
 			os.Exit(1)
 		}
