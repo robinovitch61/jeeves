@@ -309,12 +309,20 @@ func (m *model) updateFullscreenMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m model) View() tea.View {
 	var content string
 	if !m.ready || m.loading {
-		content = m.spinner.View() + " Searching..."
+		if m.searchTerm == "" {
+			content = m.spinner.View() + " Loading..."
+		} else {
+			content = m.spinner.View() + " Searching..."
+		}
 	} else {
 		switch m.mode {
 		case viewModeList:
 			if len(m.conversations) == 0 {
-				content = fmt.Sprintf("No conversations matching %q", m.searchTerm)
+				if m.searchTerm == "" {
+					content = "No conversations found"
+				} else {
+					content = fmt.Sprintf("No conversations matching %q", m.searchTerm)
+				}
 			} else {
 				sep := m.renderSeparator()
 				content = lipgloss.JoinHorizontal(lipgloss.Top, m.listFV.View(), sep, m.previewFV.View())
@@ -457,9 +465,13 @@ func (m *model) updatePreview() {
 
 func searchCmd(searchTerm string) tea.Cmd {
 	return func() tea.Msg {
-		re, err := regexp.Compile(searchTerm)
-		if err != nil {
-			return searchErrorMsg{err: fmt.Errorf("invalid regex %q: %w", searchTerm, err)}
+		var re *regexp.Regexp
+		if searchTerm != "" {
+			var err error
+			re, err = regexp.Compile(searchTerm)
+			if err != nil {
+				return searchErrorMsg{err: fmt.Errorf("invalid regex %q: %w", searchTerm, err)}
+			}
 		}
 
 		homeDir, err := os.UserHomeDir()
@@ -548,6 +560,7 @@ func extractText(raw json.RawMessage) string {
 	return ""
 }
 
+// parseSessionMetadata parses a session JSONL file. If re is nil, all conversations match.
 func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, bool) {
 	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
 	if err != nil {
@@ -596,7 +609,7 @@ func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, boo
 				text := extractText(msg.Content)
 
 				// check for search term match in message text
-				if !hasMatch && re.MatchString(text) {
+				if !hasMatch && (re == nil || re.MatchString(text)) {
 					hasMatch = true
 				}
 
@@ -804,11 +817,6 @@ func relativeTime(t time.Time) string {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: jeeves <regex>\n")
-		os.Exit(1)
-	}
-
 	searchTerm := strings.Join(os.Args[1:], " ")
 
 	p := tea.NewProgram(initialModel(searchTerm))
