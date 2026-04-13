@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -449,13 +450,18 @@ func (m *model) updatePreview() {
 		objects[i] = previewLine{line: item.NewItem(l)}
 	}
 	m.previewFV.SetObjects(objects)
-	m.previewFV.SetFilter(m.searchTerm, false)
+	m.previewFV.SetFilter(m.searchTerm, true)
 }
 
 // search and parsing
 
 func searchCmd(searchTerm string) tea.Cmd {
 	return func() tea.Msg {
+		re, err := regexp.Compile(searchTerm)
+		if err != nil {
+			return searchErrorMsg{err: fmt.Errorf("invalid regex %q: %w", searchTerm, err)}
+		}
+
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
 			return searchErrorMsg{err: err}
@@ -483,7 +489,7 @@ func searchCmd(searchTerm string) tea.Cmd {
 					continue
 				}
 				filePath := filepath.Join(projDir, f.Name())
-				conv, hasMatch := parseSessionMetadata(filePath, searchTerm)
+				conv, hasMatch := parseSessionMetadata(filePath, re)
 				if !hasMatch {
 					continue
 				}
@@ -542,7 +548,7 @@ func extractText(raw json.RawMessage) string {
 	return ""
 }
 
-func parseSessionMetadata(filePath string, searchTerm string) (conversation, bool) {
+func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, bool) {
 	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
 	if err != nil {
 		return conversation{}, false
@@ -590,7 +596,7 @@ func parseSessionMetadata(filePath string, searchTerm string) (conversation, boo
 				text := extractText(msg.Content)
 
 				// check for search term match in message text
-				if !hasMatch && strings.Contains(text, searchTerm) {
+				if !hasMatch && re.MatchString(text) {
 					hasMatch = true
 				}
 
@@ -799,7 +805,7 @@ func relativeTime(t time.Time) string {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: jeeves <searchterm>\n")
+		fmt.Fprintf(os.Stderr, "usage: jeeves <regex>\n")
 		os.Exit(1)
 	}
 
