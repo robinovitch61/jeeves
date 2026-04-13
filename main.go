@@ -601,6 +601,40 @@ func extractText(raw json.RawMessage) string {
 	return ""
 }
 
+// extractSummary finds the first line of user-authored text from message content,
+// skipping system-injected content blocks that start with <.
+func extractSummary(raw json.RawMessage) string {
+	// returns the first line if the text doesn't start with a < tag,
+	// indicating system-injected content
+	check := func(text string) string {
+		trimmed := strings.TrimSpace(text)
+		if trimmed == "" || strings.HasPrefix(trimmed, "<") {
+			return ""
+		}
+		return firstLine(trimmed)
+	}
+
+	// try string first
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return check(s)
+	}
+
+	// try array of content blocks — check each block independently
+	var blocks []contentBlock
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				if s := check(b.Text); s != "" {
+					return s
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
 // parseSessionMetadata parses a session JSONL file. If re is nil, all conversations match.
 func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, bool) {
 	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
@@ -654,10 +688,12 @@ func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, boo
 					hasMatch = true
 				}
 
-				// extract summary from first user message
+				// extract summary from first user message text block not starting with <
 				if !foundSummary && msg.Role == "user" {
-					conv.summary = truncate(firstLine(text), 200)
-					foundSummary = true
+					if s := extractSummary(msg.Content); s != "" {
+						conv.summary = truncate(s, 200)
+						foundSummary = true
+					}
 				}
 			}
 		}
