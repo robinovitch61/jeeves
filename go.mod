@@ -8,7 +8,7 @@ require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.2
 	charm.land/lipgloss/v2 v2.0.2
-	github.com/robinovitch61/viewport v0.11.3
+	github.com/robinovitch61/viewport v0.13.1
 )
 
 require (
@@ -21,7 +21,6 @@ require (
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-runewidth v0.0.21 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect

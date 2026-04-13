@@ -129,7 +129,7 @@ type model struct {
 	rows          []conversationRow
 
 	listFV    *filterableviewport.Model[conversationRow]
-	previewFV *filterableviewport.Model[previewLine]
+	previewVP *viewport.Model[previewLine]
 	fullFV    *filterableviewport.Model[contentLine]
 
 	ready           bool
@@ -184,6 +184,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				lines[i] = contentLine{line: item.NewItem(l)}
 			}
 			m.fullFV.SetObjects(lines)
+			if m.searchTerm != "" {
+				m.fullFV.SetFilter(m.searchTerm, filterableviewport.FilterRegex)
+			}
 		}
 		return m, nil
 
@@ -229,7 +232,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case viewModeList:
 			m.listFV, cmd = m.listFV.Update(msg)
 			cmds = append(cmds, cmd)
-			m.previewFV, cmd = m.previewFV.Update(msg)
+			m.previewVP, cmd = m.previewVP.Update(msg)
 			cmds = append(cmds, cmd)
 			m.checkSelectionChanged()
 		case viewModeFullscreen:
@@ -290,15 +293,23 @@ func (m *model) updateFullscreenMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, appKeyMap.escape):
+		if m.fullFV.GetFilterText() != "" {
+			m.fullFV.SetFilter("", filterableviewport.FilterRegex)
+			return m, nil
+		}
 		m.mode = viewModeList
 		m.listFV.SetWidth(m.listWidth())
 		m.listFV.SetHeight(m.height)
-		m.previewFV.SetWidth(m.previewWidth())
-		m.previewFV.SetHeight(m.height)
+		m.previewVP.SetWidth(m.previewWidth())
+		m.previewVP.SetHeight(m.height)
 		return m, nil
 
 	case key.Matches(msg, appKeyMap.quit):
 		return m, tea.Quit
+
+	case msg.String() == "w":
+		m.fullFV.SetWrapText(!m.fullFV.GetWrapText())
+		return m, nil
 	}
 
 	m.fullFV, cmd = m.fullFV.Update(msg)
@@ -325,7 +336,7 @@ func (m model) View() tea.View {
 				}
 			} else {
 				sep := m.renderSeparator()
-				content = lipgloss.JoinHorizontal(lipgloss.Top, m.listFV.View(), sep, m.previewFV.View())
+				content = lipgloss.JoinHorizontal(lipgloss.Top, m.listFV.View(), sep, m.previewVP.View())
 			}
 		case viewModeFullscreen:
 			content = m.fullFV.View()
@@ -380,23 +391,16 @@ func (m *model) initViewports() {
 		filterableviewport.WithVerticalPad[conversationRow](5),
 	)
 
-	// preview pane (right) — non-interactive, filter hard-set to search term
-	previewVP := viewport.New[previewLine](
+	// preview pane (right) — non-interactive, highlights set from search term
+	m.previewVP = viewport.New[previewLine](
 		m.previewWidth(),
 		m.height,
 		viewport.WithKeyMap[previewLine](viewport.KeyMap{}),
 		viewport.WithStyles[previewLine](viewport.DefaultStyles()),
+		viewport.WithProgressBarEnabled[previewLine](true),
 	)
-	m.previewFV = filterableviewport.New[previewLine](
-		previewVP,
-		filterableviewport.WithKeyMap[previewLine](filterableviewport.KeyMap{}),
-		filterableviewport.WithStyles[previewLine](filterableviewport.DefaultStyles()),
-		filterableviewport.WithEmptyText[previewLine](""),
-		filterableviewport.WithHorizontalPad[previewLine](50),
-		filterableviewport.WithVerticalPad[previewLine](1000000), // ensure centered when possible
-	)
-	m.previewFV.SetWrapText(true)
-	m.previewFV.SetSelectionEnabled(false)
+	m.previewVP.SetWrapText(true)
+	m.previewVP.SetSelectionEnabled(false)
 
 	// fullscreen pane
 	fullVP := viewport.New[contentLine](
@@ -404,6 +408,7 @@ func (m *model) initViewports() {
 		m.height,
 		viewport.WithKeyMap[contentLine](viewportKeyMap),
 		viewport.WithStyles[contentLine](viewport.DefaultStyles()),
+		viewport.WithProgressBarEnabled[contentLine](true),
 	)
 	m.fullFV = filterableviewport.New[contentLine](
 		fullVP,
@@ -425,8 +430,8 @@ func (m *model) resizeViewports() {
 	case viewModeList:
 		m.listFV.SetWidth(m.listWidth())
 		m.listFV.SetHeight(m.height)
-		m.previewFV.SetWidth(m.previewWidth())
-		m.previewFV.SetHeight(m.height)
+		m.previewVP.SetWidth(m.previewWidth())
+		m.previewVP.SetHeight(m.height)
 		// rebuild rows with new width
 		if len(m.conversations) > 0 {
 			m.rows = buildRows(m.conversations, m.listWidth())
@@ -449,7 +454,7 @@ func (m *model) checkSelectionChanged() {
 func (m *model) updatePreview() {
 	sel := m.listFV.GetSelectedItem()
 	if sel == nil {
-		m.previewFV.SetObjects(nil)
+		m.previewVP.SetObjects(nil)
 		return
 	}
 	lines := loadPreview(sel.conv)
@@ -457,8 +462,44 @@ func (m *model) updatePreview() {
 	for i, l := range lines {
 		objects[i] = previewLine{line: item.NewItem(l)}
 	}
-	m.previewFV.SetObjects(objects)
-	m.previewFV.SetFilter(m.searchTerm, true)
+	m.previewVP.SetObjects(objects)
+
+	if m.searchTerm == "" {
+		m.previewVP.SetHighlights(nil)
+		return
+	}
+
+	re, err := regexp.Compile(m.searchTerm)
+	if err != nil {
+		m.previewVP.SetHighlights(nil)
+		return
+	}
+
+	highlightStyle := lipgloss.NewStyle().Reverse(true).Foreground(lipgloss.BrightRed)
+	var highlights []viewport.Highlight
+	firstMatchItemIdx := -1
+	var firstMatchWidthRange item.WidthRange
+	for i, obj := range objects {
+		matches := obj.line.ExtractRegexMatches(re)
+		for _, match := range matches {
+			if firstMatchItemIdx == -1 {
+				firstMatchItemIdx = i
+				firstMatchWidthRange = match.WidthRange
+			}
+			highlights = append(highlights, viewport.Highlight{
+				ItemIndex: i,
+				ItemHighlight: item.Highlight{
+					Style:                    highlightStyle,
+					ByteRangeUnstyledContent: match.ByteRange,
+				},
+			})
+		}
+	}
+	m.previewVP.SetHighlights(highlights)
+
+	if firstMatchItemIdx >= 0 {
+		m.previewVP.EnsureItemInView(firstMatchItemIdx, firstMatchWidthRange.Start, firstMatchWidthRange.End, 1000000, 50)
+	}
 }
 
 // search and parsing
