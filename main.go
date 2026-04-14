@@ -30,6 +30,7 @@ type conversation struct {
 	startedAt  time.Time
 	modifiedAt time.Time
 	filePath   string
+	demoMessages []parsedMessage // populated for demo mode (in-memory, no file)
 }
 
 // conversationRow is a viewport Object for the left pane list
@@ -124,6 +125,7 @@ type searchErrorMsg struct {
 type model struct {
 	mode       viewMode
 	searchTerm string
+	demo bool
 
 	conversations []conversation
 	rows          []conversationRow
@@ -141,12 +143,13 @@ type model struct {
 	resumeCwd       string
 }
 
-func initialModel(searchTerm string) model {
+func initialModel(searchTerm string, demo bool) model {
 	s := spinner.New(spinner.WithSpinner(spinner.Dot))
 	s.Style = dimStyle
 	return model{
 		mode:            viewModeList,
 		searchTerm:      searchTerm,
+		demo:            demo,
 		lastSelectedIdx: -1,
 		loading:         true,
 		spinner:         s,
@@ -154,6 +157,9 @@ func initialModel(searchTerm string) model {
 }
 
 func (m model) Init() tea.Cmd {
+	if m.demo {
+		return tea.Batch(m.spinner.Tick, demoSearchCmd(m.searchTerm))
+	}
 	return tea.Batch(m.spinner.Tick, searchCmd(m.searchTerm))
 }
 
@@ -710,14 +716,20 @@ func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, boo
 }
 
 func loadPreview(conv conversation) []string {
-	messages := parseMessages(conv.filePath, 0)
-	return formatMessages(messages)
+	msgs := conv.demoMessages
+	if msgs == nil {
+		msgs = parseMessages(conv.filePath, 0)
+	}
+	return formatMessages(msgs)
 }
 
 func loadConversationCmd(conv conversation) tea.Cmd {
 	return func() tea.Msg {
-		messages := parseMessages(conv.filePath, 0) // 0 = all messages
-		lines := formatMessages(messages)
+		msgs := conv.demoMessages
+		if msgs == nil {
+			msgs = parseMessages(conv.filePath, 0)
+		}
+		lines := formatMessages(msgs)
 		return conversationContentMsg{
 			sessionID: conv.sessionID,
 			lines:     lines,
@@ -894,9 +906,18 @@ func relativeTime(t time.Time) string {
 }
 
 func main() {
-	searchTerm := strings.Join(os.Args[1:], " ")
+	var demo bool
+	var args []string
+	for _, arg := range os.Args[1:] {
+		if arg == "--demo" {
+			demo = true
+		} else {
+			args = append(args, arg)
+		}
+	}
+	searchTerm := strings.Join(args, " ")
 
-	p := tea.NewProgram(initialModel(searchTerm))
+	p := tea.NewProgram(initialModel(searchTerm, demo))
 	result, err := p.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
