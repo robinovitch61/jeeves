@@ -42,6 +42,14 @@ jeeves "fix.*bug"
 | esc       | back to list              |
 | q/ctrl+c  | quit                      |
 
+> [!TIP]
+> By default, Claude Code deletes sessions older than 30 days. To keep all your sessions browsable in jeeves, set a large cleanup period in `~/.claude/settings.json`:
+> ```json
+> {
+>   "cleanupPeriodDays": 99999
+> }
+> ```
+
 ## Installation
 
 ```shell
