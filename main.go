@@ -416,7 +416,16 @@ func (m model) renderHeader() string {
 		styledLogoLines = append(styledLogoLines, logoStyle.Render(l))
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Center, lipgloss.JoinVertical(lipgloss.Left, styledLogoLines...), ctrlLine)
+	header := lipgloss.JoinVertical(
+		lipgloss.Center,
+		lipgloss.JoinVertical(lipgloss.Left, styledLogoLines...),
+		ctrlLine,
+	)
+
+	return lipgloss.NewStyle().
+		Width(m.listWidth()).
+		Align(lipgloss.Center).
+		Render(header)
 }
 
 func (m model) listWidth() int {
@@ -1114,39 +1123,81 @@ func formatMessages(messages []parsedMessage) []string {
 
 // row building
 
+type rowLayout struct {
+	providerWidth int
+	summaryWidth  int
+	cwdWidth      int
+	modifiedWidth int
+	totalWidth    int
+}
+
 func buildRows(convs []conversation, width int) []conversationRow {
+	layout := computeRowLayout(convs, width)
 	rows := make([]conversationRow, len(convs))
 	for i, conv := range convs {
 		rows[i] = conversationRow{
 			conv: conv,
-			line: item.NewItem(formatRow(conv, width)),
+			line: item.NewItem(formatRow(conv, layout)),
 		}
 	}
 	return rows
 }
 
-func formatRow(conv conversation, width int) string {
-	// format: provider | summary | cwd | modified
-	modified := relativeTime(conv.modifiedAt)
-	cwd := shortenPath(conv.cwd)
-	provider := providerLabel(conv.provider)
-
-	modWidth := len(modified) + 1
-	cwdWidth := min(len(cwd), 30) + 1
-	providerWidth := len(provider) + 1
-	summaryWidth := width - providerWidth - modWidth - cwdWidth - 4 // padding
-	if summaryWidth < 10 {
-		summaryWidth = 10
+func computeRowLayout(convs []conversation, width int) rowLayout {
+	layout := rowLayout{
+		providerWidth: len(providerLabel(providerClaudeCode)),
+		cwdWidth:      8,
+		totalWidth:    width,
 	}
 
-	summary := truncate(conv.summary, summaryWidth)
+	layout.modifiedWidth = len("just now")
+	for _, conv := range convs {
+		layout.providerWidth = max(layout.providerWidth, len(providerLabel(conv.provider)))
+		layout.cwdWidth = max(layout.cwdWidth, len(truncatePath(shortenPath(conv.cwd), 24)))
+		layout.modifiedWidth = max(layout.modifiedWidth, len(relativeTime(conv.modifiedAt)))
+	}
+	layout.modifiedWidth++
 
-	return fmt.Sprintf("%s %-*s %s %s",
-		dimStyle.Render(provider),
-		summaryWidth, summary,
-		dimStyle.Render(fmt.Sprintf("%-*s", cwdWidth, truncate(cwd, cwdWidth))),
-		dimStyle.Render(modified),
+	layout.cwdWidth = min(layout.cwdWidth, 24)
+
+	// Three single-space separators between the four columns.
+	layout.summaryWidth = width - layout.providerWidth - layout.cwdWidth - layout.modifiedWidth - 3
+	if layout.summaryWidth < 10 {
+		cwdShrink := 10 - layout.summaryWidth
+		layout.cwdWidth = max(8, layout.cwdWidth-cwdShrink)
+		layout.summaryWidth = width - layout.providerWidth - layout.cwdWidth - layout.modifiedWidth - 3
+	}
+	if layout.summaryWidth < 10 {
+		layout.summaryWidth = 10
+	}
+
+	return layout
+}
+
+func formatRow(conv conversation, layout rowLayout) string {
+	// format: provider | summary | cwd | modified
+	modified := relativeTime(conv.modifiedAt)
+	provider := providerLabel(conv.provider)
+	summary := truncate(conv.summary, layout.summaryWidth)
+	cwdText := truncatePath(shortenPath(conv.cwd), layout.cwdWidth)
+
+	providerCol := lipgloss.NewStyle().Width(layout.providerWidth).Render(provider)
+	summaryCol := lipgloss.NewStyle().Width(layout.summaryWidth).Render(summary)
+	cwdCol := lipgloss.NewStyle().Width(layout.cwdWidth).Render(cwdText)
+	modifiedCol := lipgloss.NewStyle().Width(layout.modifiedWidth).Render(modified)
+
+	row := fmt.Sprintf("%s %s %s %s",
+		dimStyle.Render(providerCol),
+		summaryCol,
+		dimStyle.Render(cwdCol),
+		dimStyle.Render(modifiedCol),
 	)
+
+	if pad := layout.totalWidth - lipgloss.Width(row); pad > 0 {
+		row += strings.Repeat(" ", pad)
+	}
+
+	return row
 }
 
 // utility functions
@@ -1159,6 +1210,25 @@ func truncate(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func truncatePath(path string, maxLen int) string {
+	if len(path) <= maxLen {
+		return path
+	}
+	if maxLen <= 3 {
+		return strings.Repeat(".", maxLen)
+	}
+
+	suffix := path[len(path)-(maxLen-3):]
+	if idx := strings.IndexByte(suffix, '/'); idx > 0 {
+		candidate := "..." + suffix[idx:]
+		if len(candidate) <= maxLen {
+			return candidate
+		}
+	}
+
+	return "..." + suffix
 }
 
 func firstLine(s string) string {

@@ -62,10 +62,10 @@ Output demo.gif
 Require jeeves
 
 Set TypingSpeed 100ms
-Set FontSize 20
-Set Width 1500
+Set FontSize 18
+Set Width 1600
 Set Height 700
-Set Padding 25
+Set Padding 10
 
 Hide
 Type@1ms "clear"
