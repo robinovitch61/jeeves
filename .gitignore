@@ -1,3 +1,10 @@
-.claude
 jeeves
+*.log
+*.prof
+*.txt
+.DS_Store
+.claude
+.env
 .idea
+.run
+pyproject.toml
