@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,9 +39,17 @@ func getVersion() string {
 	return versioninfo.Short()
 }
 
-// conversation holds metadata about a single Claude session
+type sessionProvider string
+
+const (
+	providerClaudeCode sessionProvider = "claude"
+	providerCodex      sessionProvider = "codex"
+)
+
+// conversation holds metadata about a single AI agent session
 type conversation struct {
 	sessionID    string
+	provider     sessionProvider
 	cwd          string
 	summary      string
 	startedAt    time.Time
@@ -107,7 +117,7 @@ var appKeyMap = appKeys{
 	),
 	resume: key.NewBinding(
 		key.WithKeys("r"),
-		key.WithHelp("r", "resume in claude"),
+		key.WithHelp("r", "resume"),
 	),
 }
 
@@ -166,6 +176,7 @@ type model struct {
 	width, height   int
 	lastSelectedIdx int
 	resumeSessionID string
+	resumeProvider  sessionProvider
 	resumeCwd       string
 }
 
@@ -302,6 +313,7 @@ func (m model) updateListMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, appKeyMap.resume):
 		if sel := m.listFV.GetSelectedItem(); sel != nil {
 			m.resumeSessionID = sel.conv.sessionID
+			m.resumeProvider = sel.conv.provider
 			m.resumeCwd = sel.conv.cwd
 			return m, tea.Quit
 		}
@@ -584,35 +596,10 @@ func searchCmd(searchTerm string) tea.Cmd {
 		if err != nil {
 			return searchErrorMsg{err: err}
 		}
-		projectsDir := filepath.Join(homeDir, ".claude", "projects")
 
-		// walk all project directories for session JSONL files
-		var conversations []conversation
-		projectEntries, err := os.ReadDir(projectsDir)
+		conversations, err := discoverConversations(homeDir, re)
 		if err != nil {
-			return searchErrorMsg{err: fmt.Errorf("reading projects dir: %w", err)}
-		}
-
-		for _, projEntry := range projectEntries {
-			if !projEntry.IsDir() {
-				continue
-			}
-			projDir := filepath.Join(projectsDir, projEntry.Name())
-			files, err := os.ReadDir(projDir)
-			if err != nil {
-				continue
-			}
-			for _, f := range files {
-				if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
-					continue
-				}
-				filePath := filepath.Join(projDir, f.Name())
-				conv, hasMatch := parseSessionMetadata(filePath, re)
-				if !hasMatch {
-					continue
-				}
-				conversations = append(conversations, conv)
-			}
+			return searchErrorMsg{err: err}
 		}
 
 		// sort by most recently modified first
@@ -624,13 +611,114 @@ func searchCmd(searchTerm string) tea.Cmd {
 	}
 }
 
-// jsonlEntry is used for lightweight JSONL parsing
+func discoverConversations(homeDir string, re *regexp.Regexp) ([]conversation, error) {
+	var conversations []conversation
+
+	claudeConversations, err := discoverClaudeConversations(filepath.Join(homeDir, ".claude", "projects"), re)
+	if err != nil {
+		return nil, err
+	}
+	conversations = append(conversations, claudeConversations...)
+
+	codexConversations, err := discoverCodexConversations(filepath.Join(homeDir, ".codex", "sessions"), re)
+	if err != nil {
+		return nil, err
+	}
+	conversations = append(conversations, codexConversations...)
+
+	return conversations, nil
+}
+
+func discoverClaudeConversations(projectsDir string, re *regexp.Regexp) ([]conversation, error) {
+	projectEntries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading claude projects dir: %w", err)
+	}
+
+	var conversations []conversation
+	for _, projEntry := range projectEntries {
+		if !projEntry.IsDir() {
+			continue
+		}
+		projDir := filepath.Join(projectsDir, projEntry.Name())
+		files, err := os.ReadDir(projDir)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+				continue
+			}
+			filePath := filepath.Join(projDir, f.Name())
+			conv, hasMatch := parseClaudeSessionMetadata(filePath, re)
+			if !hasMatch {
+				continue
+			}
+			conversations = append(conversations, conv)
+		}
+	}
+
+	return conversations, nil
+}
+
+func discoverCodexConversations(sessionsDir string, re *regexp.Regexp) ([]conversation, error) {
+	if _, err := os.Stat(sessionsDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("stat codex sessions dir: %w", err)
+	}
+
+	var conversations []conversation
+	err := filepath.WalkDir(sessionsDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+			return nil
+		}
+
+		conv, hasMatch := parseCodexSessionMetadata(path, re)
+		if hasMatch {
+			conversations = append(conversations, conv)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walking codex sessions dir: %w", err)
+	}
+
+	return conversations, nil
+}
+
+// jsonlEntry is used for lightweight Claude Code JSONL parsing.
 type jsonlEntry struct {
 	Type      string          `json:"type"`
 	Message   json.RawMessage `json:"message,omitempty"`
 	Timestamp string          `json:"timestamp"`
 	Cwd       string          `json:"cwd"`
 	SessionID string          `json:"sessionId"`
+}
+
+type codexJSONLEntry struct {
+	Type      string          `json:"type"`
+	Timestamp string          `json:"timestamp"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+type codexSessionMetaPayload struct {
+	ID        string `json:"id"`
+	Timestamp string `json:"timestamp"`
+	Cwd       string `json:"cwd"`
+}
+
+type codexMessagePayload struct {
+	Type    string          `json:"type"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
 }
 
 type msgContent struct {
@@ -642,6 +730,10 @@ type contentBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
 	Name string `json:"name,omitempty"` // for tool_use blocks
+}
+
+func isTextBlockType(blockType string) bool {
+	return blockType == "text" || blockType == "input_text" || blockType == "output_text"
 }
 
 func extractText(raw json.RawMessage) string {
@@ -656,7 +748,7 @@ func extractText(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &blocks); err == nil {
 		var parts []string
 		for _, b := range blocks {
-			if b.Type == "text" && b.Text != "" {
+			if isTextBlockType(b.Type) && b.Text != "" {
 				parts = append(parts, b.Text)
 			}
 		}
@@ -689,7 +781,7 @@ func extractSummary(raw json.RawMessage) string {
 	var blocks []contentBlock
 	if err := json.Unmarshal(raw, &blocks); err == nil {
 		for _, b := range blocks {
-			if b.Type == "text" && b.Text != "" {
+			if isTextBlockType(b.Type) && b.Text != "" {
 				if s := check(b.Text); s != "" {
 					return s
 				}
@@ -700,8 +792,19 @@ func extractSummary(raw json.RawMessage) string {
 	return ""
 }
 
-// parseSessionMetadata parses a session JSONL file. If re is nil, all conversations match.
-func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, bool) {
+func parseTimestamp(raw string) time.Time {
+	if raw == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// parseClaudeSessionMetadata parses a Claude Code session JSONL file.
+func parseClaudeSessionMetadata(filePath string, re *regexp.Regexp) (conversation, bool) {
 	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
 	if err != nil {
 		return conversation{}, false
@@ -712,6 +815,7 @@ func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, boo
 
 	var conv conversation
 	conv.sessionID = sessionID
+	conv.provider = providerClaudeCode
 	conv.filePath = filePath
 
 	scanner := bufio.NewScanner(f)
@@ -728,13 +832,11 @@ func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, boo
 		}
 
 		// parse timestamp
-		if entry.Timestamp != "" {
-			if t, err := time.Parse(time.RFC3339Nano, entry.Timestamp); err == nil {
-				if firstTimestamp.IsZero() {
-					firstTimestamp = t
-				}
-				lastTimestamp = t
+		if t := parseTimestamp(entry.Timestamp); !t.IsZero() {
+			if firstTimestamp.IsZero() {
+				firstTimestamp = t
 			}
+			lastTimestamp = t
 		}
 
 		// extract cwd
@@ -774,10 +876,92 @@ func parseSessionMetadata(filePath string, re *regexp.Regexp) (conversation, boo
 	return conv, hasMatch
 }
 
+// parseCodexSessionMetadata parses a Codex session JSONL file.
+func parseCodexSessionMetadata(filePath string, re *regexp.Regexp) (conversation, bool) {
+	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
+	if err != nil {
+		return conversation{}, false
+	}
+	defer func() { _ = f.Close() }()
+
+	var conv conversation
+	conv.sessionID = strings.TrimSuffix(filepath.Base(filePath), ".jsonl")
+	conv.provider = providerCodex
+	conv.filePath = filePath
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line
+
+	var firstTimestamp, lastTimestamp time.Time
+	foundSummary := false
+	hasMatch := false
+
+	for scanner.Scan() {
+		var entry codexJSONLEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+
+		if t := parseTimestamp(entry.Timestamp); !t.IsZero() {
+			if firstTimestamp.IsZero() {
+				firstTimestamp = t
+			}
+			lastTimestamp = t
+		}
+
+		switch entry.Type {
+		case "session_meta":
+			var payload codexSessionMetaPayload
+			if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.ID != "" {
+				conv.sessionID = payload.ID
+			}
+			if conv.cwd == "" && payload.Cwd != "" {
+				conv.cwd = payload.Cwd
+			}
+			if t := parseTimestamp(payload.Timestamp); !t.IsZero() && firstTimestamp.IsZero() {
+				firstTimestamp = t
+			}
+
+		case "response_item":
+			var payload codexMessagePayload
+			if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.Type != "message" || (payload.Role != "user" && payload.Role != "assistant") {
+				continue
+			}
+
+			text := extractText(payload.Content)
+			if !hasMatch && (re == nil || re.MatchString(text)) {
+				hasMatch = true
+			}
+
+			if !foundSummary && payload.Role == "user" {
+				if s := extractSummary(payload.Content); s != "" {
+					conv.summary = truncate(s, 200)
+					foundSummary = true
+				}
+			}
+		}
+	}
+
+	conv.startedAt = firstTimestamp
+	conv.modifiedAt = lastTimestamp
+
+	if conv.summary == "" {
+		conv.summary = "(no summary)"
+	}
+
+	return conv, hasMatch
+}
+
 func loadPreview(conv conversation) []string {
 	msgs := conv.demoMessages
 	if msgs == nil {
-		msgs = parseMessages(conv.filePath, 0)
+		msgs = parseMessages(conv, 0)
 	}
 	return formatMessages(msgs)
 }
@@ -786,7 +970,7 @@ func loadConversationCmd(conv conversation) tea.Cmd {
 	return func() tea.Msg {
 		msgs := conv.demoMessages
 		if msgs == nil {
-			msgs = parseMessages(conv.filePath, 0)
+			msgs = parseMessages(conv, 0)
 		}
 		lines := formatMessages(msgs)
 		return conversationContentMsg{
@@ -801,7 +985,16 @@ type parsedMessage struct {
 	text string
 }
 
-func parseMessages(filePath string, lastN int) []parsedMessage {
+func parseMessages(conv conversation, lastN int) []parsedMessage {
+	switch conv.provider {
+	case providerCodex:
+		return parseCodexMessages(conv.filePath, lastN)
+	default:
+		return parseClaudeMessages(conv.filePath, lastN)
+	}
+}
+
+func parseClaudeMessages(filePath string, lastN int) []parsedMessage {
 	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
 	if err != nil {
 		return nil
@@ -838,6 +1031,53 @@ func parseMessages(filePath string, lastN int) []parsedMessage {
 
 		messages = append(messages, parsedMessage{
 			role: msg.Role,
+			text: text,
+		})
+	}
+
+	if lastN > 0 && len(messages) > lastN {
+		messages = messages[len(messages)-lastN:]
+	}
+
+	return messages
+}
+
+func parseCodexMessages(filePath string, lastN int) []parsedMessage {
+	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	var messages []parsedMessage
+
+	for scanner.Scan() {
+		var entry codexJSONLEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		if entry.Type != "response_item" {
+			continue
+		}
+
+		var payload codexMessagePayload
+		if err := json.Unmarshal(entry.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Type != "message" || (payload.Role != "user" && payload.Role != "assistant") {
+			continue
+		}
+
+		text := extractText(payload.Content)
+		if text == "" {
+			continue
+		}
+
+		messages = append(messages, parsedMessage{
+			role: payload.Role,
 			text: text,
 		})
 	}
@@ -886,20 +1126,23 @@ func buildRows(convs []conversation, width int) []conversationRow {
 }
 
 func formatRow(conv conversation, width int) string {
-	// format: summary | cwd | modified
+	// format: provider | summary | cwd | modified
 	modified := relativeTime(conv.modifiedAt)
 	cwd := shortenPath(conv.cwd)
+	provider := providerLabel(conv.provider)
 
 	modWidth := len(modified) + 1
 	cwdWidth := min(len(cwd), 30) + 1
-	summaryWidth := width - modWidth - cwdWidth - 4 // padding
+	providerWidth := len(provider) + 1
+	summaryWidth := width - providerWidth - modWidth - cwdWidth - 4 // padding
 	if summaryWidth < 10 {
 		summaryWidth = 10
 	}
 
 	summary := truncate(conv.summary, summaryWidth)
 
-	return fmt.Sprintf("%-*s %s %s",
+	return fmt.Sprintf("%s %-*s %s %s",
+		dimStyle.Render(provider),
 		summaryWidth, summary,
 		dimStyle.Render(fmt.Sprintf("%-*s", cwdWidth, truncate(cwd, cwdWidth))),
 		dimStyle.Render(modified),
@@ -931,6 +1174,17 @@ func shortenPath(path string) string {
 		return "~" + path[len(homeDir):]
 	}
 	return path
+}
+
+func providerLabel(provider sessionProvider) string {
+	switch provider {
+	case providerClaudeCode:
+		return "[claude]"
+	case providerCodex:
+		return "[codex]"
+	default:
+		return "[demo]"
+	}
 }
 
 func relativeTime(t time.Time) string {
@@ -989,12 +1243,15 @@ func main() {
 
 	// check if we need to resume a conversation
 	var resumeSessionID, resumeCwd string
+	var resumeProvider sessionProvider
 	switch fm := result.(type) {
 	case model:
 		resumeSessionID = fm.resumeSessionID
+		resumeProvider = fm.resumeProvider
 		resumeCwd = fm.resumeCwd
 	case *model:
 		resumeSessionID = fm.resumeSessionID
+		resumeProvider = fm.resumeProvider
 		resumeCwd = fm.resumeCwd
 	}
 	if resumeSessionID != "" {
@@ -1004,12 +1261,20 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		binary, err := exec.LookPath("claude")
+		binaryName := "claude"
+		command := []string{"claude", "--resume", resumeSessionID}
+		switch resumeProvider {
+		case providerCodex:
+			binaryName = "codex"
+			command = []string{"codex", "resume", resumeSessionID}
+		}
+
+		binary, err := exec.LookPath(binaryName)
 		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "claude not found: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "%s not found: %v\n", binaryName, err)
 			os.Exit(1)
 		}
-		if err := syscall.Exec(binary, []string{"claude", "--resume", resumeSessionID}, os.Environ()); err != nil { //nolint:gosec // intentional: exec into claude with user-selected session
+		if err := syscall.Exec(binary, command, os.Environ()); err != nil { //nolint:gosec // intentional: exec into the selected agent CLI
 			_, _ = fmt.Fprintf(os.Stderr, "exec error: %v\n", err)
 			os.Exit(1)
 		}
