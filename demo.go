@@ -56,7 +56,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-004",
-		provider:  providerCodex,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-3 * 24 * time.Hour),
 		messages: []parsedMessage{
@@ -66,7 +66,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-005",
-		provider:  providerClaudeCode,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-7 * 24 * time.Hour),
 		messages: []parsedMessage{
@@ -122,7 +122,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-010",
-		provider:  providerCodex,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-2 * 24 * time.Hour),
 		messages: []parsedMessage{
@@ -166,7 +166,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-014",
-		provider:  providerClaudeCode,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-10 * time.Hour),
 		messages: []parsedMessage{
@@ -176,7 +176,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-015",
-		provider:  providerCodex,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-5 * 24 * time.Hour),
 		messages: []parsedMessage{
@@ -206,7 +206,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-018",
-		provider:  providerClaudeCode,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-15 * time.Hour),
 		messages: []parsedMessage{
@@ -236,7 +236,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-021",
-		provider:  providerCodex,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-6 * 24 * time.Hour),
 		messages: []parsedMessage{
@@ -266,7 +266,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-024",
-		provider:  providerClaudeCode,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-52 * time.Hour),
 		messages: []parsedMessage{
@@ -296,7 +296,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-027",
-		provider:  providerCodex,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-4 * 24 * time.Hour),
 		messages: []parsedMessage{
@@ -326,7 +326,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-030",
-		provider:  providerClaudeCode,
+		provider:  providerOpenCode,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-10 * 24 * time.Hour),
 		messages: []parsedMessage{

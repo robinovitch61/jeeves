@@ -44,6 +44,7 @@ type sessionProvider string
 const (
 	providerClaudeCode sessionProvider = "claude"
 	providerCodex      sessionProvider = "codex"
+	providerOpenCode   sessionProvider = "opencode"
 )
 
 // conversation holds metadata about a single AI agent session
@@ -635,6 +636,12 @@ func discoverConversations(homeDir string, re *regexp.Regexp) ([]conversation, e
 	}
 	conversations = append(conversations, codexConversations...)
 
+	openCodeConversations, err := discoverOpenCodeConversations(filepath.Join(homeDir, ".local", "share", "opencode", "opencode.db"), re)
+	if err != nil {
+		return nil, err
+	}
+	conversations = append(conversations, openCodeConversations...)
+
 	return conversations, nil
 }
 
@@ -701,6 +708,177 @@ func discoverCodexConversations(sessionsDir string, re *regexp.Regexp) ([]conver
 	}
 
 	return conversations, nil
+}
+
+// runSQLiteJSON runs a sqlite3 query with -json output and unmarshals the result.
+func runSQLiteJSON(sqlite3Path, dbPath, query string, dest any) error {
+	cmd := exec.Command(sqlite3Path, "-json", dbPath, query) //nolint:gosec // intentional: query is constructed internally, not from user input
+	output, err := cmd.Output()
+	if err != nil {
+		return err
+	}
+	if len(output) == 0 {
+		return nil
+	}
+	return json.Unmarshal(output, dest)
+}
+
+func discoverOpenCodeConversations(dbPath string, re *regexp.Regexp) ([]conversation, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("stat opencode db: %w", err)
+	}
+
+	sqlite3Path, lookErr := exec.LookPath("sqlite3")
+	if lookErr != nil {
+		return nil, nil //nolint:nilerr // sqlite3 not available, skip
+	}
+
+	var rows []struct {
+		ID          string `json:"id"`
+		Directory   string `json:"directory"`
+		TimeCreated int64  `json:"time_created"`
+		TimeUpdated int64  `json:"time_updated"`
+		Role        string `json:"role"`
+		Text        string `json:"text"`
+	}
+
+	query := `
+SELECT s.id, s.directory, s.time_created, s.time_updated,
+       json_extract(m.data, '$.role') as role,
+       json_extract(p.data, '$.text') as text
+FROM session s
+LEFT JOIN message m ON m.session_id = s.id
+LEFT JOIN part p ON p.message_id = m.id AND json_extract(p.data, '$.type') = 'text'
+ORDER BY s.id, m.time_created, p.time_created`
+
+	if queryErr := runSQLiteJSON(sqlite3Path, dbPath, query, &rows); queryErr != nil {
+		return nil, nil //nolint:nilerr // query failed, skip
+	}
+
+	type sessionData struct {
+		conv         conversation
+		foundSummary bool
+		hasMatch     bool
+	}
+	sessions := make(map[string]*sessionData)
+	var sessionOrder []string
+
+	for _, row := range rows {
+		sd, exists := sessions[row.ID]
+		if !exists {
+			sd = &sessionData{
+				conv: conversation{
+					sessionID:  row.ID,
+					provider:   providerOpenCode,
+					cwd:        row.Directory,
+					filePath:   dbPath,
+					startedAt:  time.UnixMilli(row.TimeCreated),
+					modifiedAt: time.UnixMilli(row.TimeUpdated),
+				},
+			}
+			sessions[row.ID] = sd
+			sessionOrder = append(sessionOrder, row.ID)
+		}
+
+		if row.Text == "" {
+			continue
+		}
+
+		if !sd.hasMatch && (re == nil || re.MatchString(row.Text)) {
+			sd.hasMatch = true
+		}
+
+		if !sd.foundSummary && row.Role == "user" {
+			trimmed := strings.TrimSpace(row.Text)
+			if trimmed != "" && !strings.HasPrefix(trimmed, "<") {
+				sd.conv.summary = truncate(firstLine(trimmed), 200)
+				sd.foundSummary = true
+			}
+		}
+	}
+
+	var conversations []conversation
+	for _, sid := range sessionOrder {
+		sd := sessions[sid]
+		if !sd.hasMatch {
+			continue
+		}
+		if sd.conv.summary == "" {
+			sd.conv.summary = "(no summary)"
+		}
+		conversations = append(conversations, sd.conv)
+	}
+
+	return conversations, nil
+}
+
+func parseOpenCodeMessages(dbPath, sessionID string, lastN int) []parsedMessage {
+	sqlite3Path, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return nil
+	}
+
+	escapedID := strings.ReplaceAll(sessionID, "'", "''")
+	query := fmt.Sprintf(`
+SELECT m.id as message_id, json_extract(m.data, '$.role') as role,
+       json_extract(p.data, '$.text') as text
+FROM message m
+JOIN part p ON p.message_id = m.id AND json_extract(p.data, '$.type') = 'text'
+WHERE m.session_id = '%s'
+ORDER BY m.time_created, p.time_created`, escapedID)
+
+	var rows []struct {
+		MessageID string `json:"message_id"`
+		Role      string `json:"role"`
+		Text      string `json:"text"`
+	}
+	if err := runSQLiteJSON(sqlite3Path, dbPath, query, &rows); err != nil {
+		return nil
+	}
+
+	type msgParts struct {
+		role  string
+		texts []string
+	}
+	var msgOrder []string
+	msgs := make(map[string]*msgParts)
+
+	for _, row := range rows {
+		if row.Role != "user" && row.Role != "assistant" {
+			continue
+		}
+		mp, exists := msgs[row.MessageID]
+		if !exists {
+			mp = &msgParts{role: row.Role}
+			msgs[row.MessageID] = mp
+			msgOrder = append(msgOrder, row.MessageID)
+		}
+		if row.Text != "" {
+			mp.texts = append(mp.texts, row.Text)
+		}
+	}
+
+	var messages []parsedMessage
+	for _, msgID := range msgOrder {
+		mp := msgs[msgID]
+		text := strings.Join(mp.texts, "\n")
+		if text == "" {
+			continue
+		}
+		messages = append(messages, parsedMessage{
+			role: mp.role,
+			text: text,
+		})
+	}
+
+	if lastN > 0 && len(messages) > lastN {
+		messages = messages[len(messages)-lastN:]
+	}
+
+	return messages
 }
 
 // jsonlEntry is used for lightweight Claude Code JSONL parsing.
@@ -998,6 +1176,8 @@ func parseMessages(conv conversation, lastN int) []parsedMessage {
 	switch conv.provider {
 	case providerCodex:
 		return parseCodexMessages(conv.filePath, lastN)
+	case providerOpenCode:
+		return parseOpenCodeMessages(conv.filePath, conv.sessionID, lastN)
 	default:
 		return parseClaudeMessages(conv.filePath, lastN)
 	}
@@ -1252,6 +1432,8 @@ func providerLabel(provider sessionProvider) string {
 		return "[claude]"
 	case providerCodex:
 		return "[codex]"
+	case providerOpenCode:
+		return "[opencode]"
 	default:
 		return "[demo]"
 	}
@@ -1337,6 +1519,9 @@ func main() {
 		case providerCodex:
 			binaryName = "codex"
 			command = []string{"codex", "resume", resumeSessionID}
+		case providerOpenCode:
+			binaryName = "opencode"
+			command = []string{"opencode", "-s", resumeSessionID}
 		}
 
 		binary, err := exec.LookPath(binaryName)
