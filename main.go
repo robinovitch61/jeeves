@@ -24,12 +24,12 @@ import (
 
 // conversation holds metadata about a single Claude session
 type conversation struct {
-	sessionID  string
-	cwd        string
-	summary    string
-	startedAt  time.Time
-	modifiedAt time.Time
-	filePath   string
+	sessionID    string
+	cwd          string
+	summary      string
+	startedAt    time.Time
+	modifiedAt   time.Time
+	filePath     string
 	demoMessages []parsedMessage // populated for demo mode (in-memory, no file)
 }
 
@@ -105,7 +105,18 @@ var (
 	assistantStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00FF88"))
 	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
 	separatorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#444444"))
+	logoStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00AAFF"))
+	keyStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00FF88"))
+	descStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
 )
+
+// ASCII logo for jeeves
+var asciiLogo = []string{
+	"   .-..----..----..-. .-..----. .----.",
+	".-.| || {_  | {_  | | | || {_  { {__",
+	"| {} || {__ | {__ \\ \\_/ /| {__ .-._} }",
+	"`----'`----'`----' `---' `----'`----'",
+}
 
 // message types
 type searchResultsMsg struct {
@@ -125,7 +136,7 @@ type searchErrorMsg struct {
 type model struct {
 	mode       viewMode
 	searchTerm string
-	demo bool
+	demo       bool
 
 	conversations []conversation
 	rows          []conversationRow
@@ -180,7 +191,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case searchErrorMsg:
 		// show error and quit
-		fmt.Fprintf(os.Stderr, "search error: %v\n", msg.err)
+		_, _ = fmt.Fprintf(os.Stderr, "search error: %v\n", msg.err)
 		return m, tea.Quit
 
 	case conversationContentMsg:
@@ -222,14 +233,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		if !m.ready {
-			m.initViewports()
+			m = m.initViewports()
 			m.ready = true
 			if len(m.rows) > 0 {
 				m.listFV.SetObjects(m.rows)
 				m.updatePreview()
 			}
 		} else {
-			m.resizeViewports()
+			m = m.resizeViewports()
 		}
 	}
 
@@ -240,7 +251,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 			m.previewVP, cmd = m.previewVP.Update(msg)
 			cmds = append(cmds, cmd)
-			m.checkSelectionChanged()
+			m = m.checkSelectionChanged()
 		case viewModeFullscreen:
 			m.fullFV, cmd = m.fullFV.Update(msg)
 			cmds = append(cmds, cmd)
@@ -250,14 +261,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m *model) updateListMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m model) updateListMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
 
 	if m.listFV.IsCapturingInput() {
 		m.listFV, cmd = m.listFV.Update(msg)
 		cmds = append(cmds, cmd)
-		m.checkSelectionChanged()
+		m = m.checkSelectionChanged()
 		return m, tea.Batch(cmds...)
 	}
 
@@ -287,7 +298,7 @@ func (m *model) updateListMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m *model) updateFullscreenMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m model) updateFullscreenMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
 
@@ -305,7 +316,7 @@ func (m *model) updateFullscreenMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.mode = viewModeList
 		m.listFV.SetWidth(m.listWidth())
-		m.listFV.SetHeight(m.height)
+		m.listFV.SetHeight(m.listPaneHeight())
 		m.previewVP.SetWidth(m.previewWidth())
 		m.previewVP.SetHeight(m.height)
 		return m, nil
@@ -342,7 +353,8 @@ func (m model) View() tea.View {
 				}
 			} else {
 				sep := m.renderSeparator()
-				content = lipgloss.JoinHorizontal(lipgloss.Top, m.listFV.View(), sep, m.previewVP.View())
+				leftCol := lipgloss.JoinVertical(lipgloss.Left, m.renderHeader(), m.listFV.View())
+				content = lipgloss.JoinHorizontal(lipgloss.Top, leftCol, sep, m.previewVP.View())
 			}
 		case viewModeFullscreen:
 			content = m.fullFV.View()
@@ -355,15 +367,40 @@ func (m model) View() tea.View {
 
 // layout helpers
 
-func (m *model) listWidth() int {
+func (m model) renderHeader() string {
+	// controls: key • description pairs
+	type control struct{ key, desc string }
+	controls := []control{
+		{"↑↓", "nav"},
+		{"enter", "open"},
+		{"r", "resume"},
+		{"/", "filter"},
+		{"q", "quit"},
+	}
+
+	var ctrlParts []string
+	for _, c := range controls {
+		ctrlParts = append(ctrlParts, keyStyle.Render(c.key)+" "+descStyle.Render(c.desc))
+	}
+	ctrlLine := strings.Join(ctrlParts, descStyle.Render(" · "))
+
+	var styledLogoLines []string
+	for _, l := range asciiLogo {
+		styledLogoLines = append(styledLogoLines, logoStyle.Render(l))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Center, lipgloss.JoinVertical(lipgloss.Left, styledLogoLines...), ctrlLine)
+}
+
+func (m model) listWidth() int {
 	return m.width * 2 / 5
 }
 
-func (m *model) previewWidth() int {
+func (m model) previewWidth() int {
 	return m.width - m.listWidth() - 1 // 1 for separator
 }
 
-func (m *model) renderSeparator() string {
+func (m model) renderSeparator() string {
 	var sb strings.Builder
 	for range m.height {
 		sb.WriteString(separatorStyle.Render("│"))
@@ -376,11 +413,15 @@ func (m *model) renderSeparator() string {
 	return s
 }
 
-func (m *model) initViewports() {
+func (m model) listPaneHeight() int {
+	return m.height - lipgloss.Height(m.renderHeader())
+}
+
+func (m model) initViewports() model {
 	// list pane (left)
 	listVP := viewport.New[conversationRow](
 		m.listWidth(),
-		m.height,
+		m.listPaneHeight(),
 		viewport.WithKeyMap[conversationRow](viewportKeyMap),
 		viewport.WithStyles[conversationRow](viewport.DefaultStyles()),
 		viewport.WithSelectionEnabled[conversationRow](true),
@@ -429,13 +470,14 @@ func (m *model) initViewports() {
 	)
 	m.fullFV.SetWrapText(true)
 	m.fullFV.SetSelectionEnabled(false)
+	return m
 }
 
-func (m *model) resizeViewports() {
+func (m model) resizeViewports() model {
 	switch m.mode {
 	case viewModeList:
 		m.listFV.SetWidth(m.listWidth())
-		m.listFV.SetHeight(m.height)
+		m.listFV.SetHeight(m.listPaneHeight())
 		m.previewVP.SetWidth(m.previewWidth())
 		m.previewVP.SetHeight(m.height)
 		// rebuild rows with new width
@@ -447,17 +489,19 @@ func (m *model) resizeViewports() {
 		m.fullFV.SetWidth(m.width)
 		m.fullFV.SetHeight(m.height)
 	}
+	return m
 }
 
-func (m *model) checkSelectionChanged() {
+func (m model) checkSelectionChanged() model {
 	idx := m.listFV.GetSelectedItemIdx()
 	if idx != m.lastSelectedIdx {
 		m.lastSelectedIdx = idx
 		m.updatePreview()
 	}
+	return m
 }
 
-func (m *model) updatePreview() {
+func (m model) updatePreview() {
 	sel := m.listFV.GetSelectedItem()
 	if sel == nil {
 		m.previewVP.SetObjects(nil)
@@ -920,7 +964,7 @@ func main() {
 	p := tea.NewProgram(initialModel(searchTerm, demo))
 	result, err := p.Run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -937,17 +981,17 @@ func main() {
 	if resumeSessionID != "" {
 		if resumeCwd != "" {
 			if err := os.Chdir(resumeCwd); err != nil {
-				fmt.Fprintf(os.Stderr, "chdir to %s: %v\n", resumeCwd, err)
+				_, _ = fmt.Fprintf(os.Stderr, "chdir to %s: %v\n", resumeCwd, err)
 				os.Exit(1)
 			}
 		}
 		binary, err := exec.LookPath("claude")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "claude not found: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "claude not found: %v\n", err)
 			os.Exit(1)
 		}
 		if err := syscall.Exec(binary, []string{"claude", "--resume", resumeSessionID}, os.Environ()); err != nil { //nolint:gosec // intentional: exec into claude with user-selected session
-			fmt.Fprintf(os.Stderr, "exec error: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "exec error: %v\n", err)
 			os.Exit(1)
 		}
 	}
