@@ -13,14 +13,29 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/carlmjohnson/versioninfo"
+
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
 	"github.com/robinovitch61/viewport/filterableviewport"
 	"github.com/robinovitch61/viewport/viewport"
 	"github.com/robinovitch61/viewport/viewport/item"
 )
+
+// Version can be set at build time via:
+//
+//	go build -ldflags "-X main.Version=vX.Y.Z"
+var Version = ""
+
+func getVersion() string {
+	if Version != "" {
+		return Version
+	}
+	return versioninfo.Short()
+}
 
 // conversation holds metadata about a single Claude session
 type conversation struct {
@@ -953,9 +968,13 @@ func main() {
 	var demo bool
 	var args []string
 	for _, arg := range os.Args[1:] {
-		if arg == "--demo" {
+		switch arg {
+		case "--demo":
 			demo = true
-		} else {
+		case "-V", "--version":
+			fmt.Printf("jeeves %s\n", getVersion())
+			os.Exit(0)
+		default:
 			args = append(args, arg)
 		}
 	}
