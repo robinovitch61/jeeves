@@ -981,7 +981,7 @@ func main() {
 	if resumeSessionID != "" {
 		if resumeCwd != "" {
 			if err := os.Chdir(resumeCwd); err != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "chdir to %s: %v\n", resumeCwd, err)
+				_, _ = fmt.Fprintf(os.Stderr, "chdir to %s: %v\n", resumeCwd, err) //nolint:gosec // writing to stderr, not a web response
 				os.Exit(1)
 			}
 		}
