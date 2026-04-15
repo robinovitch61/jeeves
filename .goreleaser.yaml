@@ -129,27 +129,5 @@ scoops:
     homepage: https://github.com/robinovitch61/jeeves
     description: "A TUI for AI agent sessions."
     license: MIT
-
-chocolateys:
-  - owners: "Leo Robinovitch"
-    authors: "Leo Robinovitch"
-    project_url: https://github.com/robinovitch61/jeeves
-    url_template: "https://github.com/robinovitch61/jeeves/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
-    license_url: https://github.com/robinovitch61/jeeves/blob/main/LICENSE
-    require_license_acceptance: false
-    project_source_url: https://github.com/robinovitch61/jeeves
-    docs_url: https://github.com/robinovitch61/jeeves/blob/main/README.md
-    bug_tracker_url: https://github.com/robinovitch61/jeeves/issues
-    tags: "jeeves claude-code tui terminal"
-    summary: "A TUI for AI agent sessions."
-    description: |
-      A TUI for AI agent sessions.
-
-      https://github.com/robinovitch61/jeeves for installation and usage.
-    release_notes: "https://github.com/robinovitch61/jeeves/releases/tag/v{{ .Version }}"
-    api_key: "{{ .Env.CHOCOLATEY_API_KEY }}"
-    source_repo: "https://push.chocolatey.org/"
-    skip_publish: false
-
 gomod:
   proxy: true
