@@ -11,7 +11,7 @@ A TUI for browsing and resuming AI agent sessions.
 <img src="./demo/demo.gif" alt="gif demo of jeeves"/>
 
 * Browse all your AI agent sessions in one place
-    * Claude Code and Codex supported
+    * Claude Code, Codex, and OpenCode supported
 * Search sessions by content
 * Preview conversation contents in a split pane
 * Open conversations to read the full conversation
