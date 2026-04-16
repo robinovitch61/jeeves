@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/carlmjohnson/versioninfo"
+	"github.com/spf13/cobra"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
@@ -160,9 +161,10 @@ type searchErrorMsg struct {
 
 // model holds all application state
 type model struct {
-	mode       viewMode
-	searchTerm string
-	demo       bool
+	mode           viewMode
+	searchTerm     string
+	excludePattern string
+	demo           bool
 
 	conversations []conversation
 	rows          []conversationRow
@@ -181,12 +183,13 @@ type model struct {
 	resumeCwd       string
 }
 
-func initialModel(searchTerm string, demo bool) model {
+func initialModel(searchTerm, excludePattern string, demo bool) model {
 	s := spinner.New(spinner.WithSpinner(spinner.Dot))
 	s.Style = dimStyle
 	return model{
 		mode:            viewModeList,
 		searchTerm:      searchTerm,
+		excludePattern:  excludePattern,
 		demo:            demo,
 		lastSelectedIdx: -1,
 		loading:         true,
@@ -198,7 +201,7 @@ func (m model) Init() tea.Cmd {
 	if m.demo {
 		return tea.Batch(m.spinner.Tick, demoSearchCmd(m.searchTerm))
 	}
-	return tea.Batch(m.spinner.Tick, searchCmd(m.searchTerm))
+	return tea.Batch(m.spinner.Tick, searchCmd(m.searchTerm, m.excludePattern))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -591,15 +594,43 @@ func (m model) updatePreview() {
 
 // search and parsing
 
-func searchCmd(searchTerm string) tea.Cmd {
+type filter struct {
+	re        *regexp.Regexp
+	excludeRe *regexp.Regexp
+}
+
+func newFilter(pattern, excludePattern string) (filter, error) {
+	var f filter
+	if pattern != "" {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return filter{}, fmt.Errorf("invalid regex %q: %w", pattern, err)
+		}
+		f.re = re
+	}
+	if excludePattern != "" {
+		re, err := regexp.Compile(excludePattern)
+		if err != nil {
+			return filter{}, fmt.Errorf("invalid exclude regex %q: %w", excludePattern, err)
+		}
+		f.excludeRe = re
+	}
+	return f, nil
+}
+
+func (f filter) matches(text string) bool {
+	return f.re == nil || f.re.MatchString(text)
+}
+
+func (f filter) excludes(text string) bool {
+	return f.excludeRe != nil && f.excludeRe.MatchString(text)
+}
+
+func searchCmd(searchTerm, excludePattern string) tea.Cmd {
 	return func() tea.Msg {
-		var re *regexp.Regexp
-		if searchTerm != "" {
-			var err error
-			re, err = regexp.Compile(searchTerm)
-			if err != nil {
-				return searchErrorMsg{err: fmt.Errorf("invalid regex %q: %w", searchTerm, err)}
-			}
+		f, err := newFilter(searchTerm, excludePattern)
+		if err != nil {
+			return searchErrorMsg{err: err}
 		}
 
 		homeDir, err := os.UserHomeDir()
@@ -607,7 +638,7 @@ func searchCmd(searchTerm string) tea.Cmd {
 			return searchErrorMsg{err: err}
 		}
 
-		conversations, err := discoverConversations(homeDir, re)
+		conversations, err := discoverConversations(homeDir, f)
 		if err != nil {
 			return searchErrorMsg{err: err}
 		}
@@ -621,22 +652,22 @@ func searchCmd(searchTerm string) tea.Cmd {
 	}
 }
 
-func discoverConversations(homeDir string, re *regexp.Regexp) ([]conversation, error) {
+func discoverConversations(homeDir string, f filter) ([]conversation, error) {
 	var conversations []conversation
 
-	claudeConversations, err := discoverClaudeConversations(filepath.Join(homeDir, ".claude", "projects"), re)
+	claudeConversations, err := discoverClaudeConversations(filepath.Join(homeDir, ".claude", "projects"), f)
 	if err != nil {
 		return nil, err
 	}
 	conversations = append(conversations, claudeConversations...)
 
-	codexConversations, err := discoverCodexConversations(filepath.Join(homeDir, ".codex", "sessions"), re)
+	codexConversations, err := discoverCodexConversations(filepath.Join(homeDir, ".codex", "sessions"), f)
 	if err != nil {
 		return nil, err
 	}
 	conversations = append(conversations, codexConversations...)
 
-	openCodeConversations, err := discoverOpenCodeConversations(filepath.Join(homeDir, ".local", "share", "opencode", "opencode.db"), re)
+	openCodeConversations, err := discoverOpenCodeConversations(filepath.Join(homeDir, ".local", "share", "opencode", "opencode.db"), f)
 	if err != nil {
 		return nil, err
 	}
@@ -645,7 +676,7 @@ func discoverConversations(homeDir string, re *regexp.Regexp) ([]conversation, e
 	return conversations, nil
 }
 
-func discoverClaudeConversations(projectsDir string, re *regexp.Regexp) ([]conversation, error) {
+func discoverClaudeConversations(projectsDir string, f filter) ([]conversation, error) {
 	projectEntries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -664,12 +695,12 @@ func discoverClaudeConversations(projectsDir string, re *regexp.Regexp) ([]conve
 		if err != nil {
 			continue
 		}
-		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+		for _, entry := range files {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 				continue
 			}
-			filePath := filepath.Join(projDir, f.Name())
-			conv, hasMatch := parseClaudeSessionMetadata(filePath, re)
+			filePath := filepath.Join(projDir, entry.Name())
+			conv, hasMatch := parseClaudeSessionMetadata(filePath, f)
 			if !hasMatch {
 				continue
 			}
@@ -680,7 +711,7 @@ func discoverClaudeConversations(projectsDir string, re *regexp.Regexp) ([]conve
 	return conversations, nil
 }
 
-func discoverCodexConversations(sessionsDir string, re *regexp.Regexp) ([]conversation, error) {
+func discoverCodexConversations(sessionsDir string, f filter) ([]conversation, error) {
 	if _, err := os.Stat(sessionsDir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -697,7 +728,7 @@ func discoverCodexConversations(sessionsDir string, re *regexp.Regexp) ([]conver
 			return nil
 		}
 
-		conv, hasMatch := parseCodexSessionMetadata(path, re)
+		conv, hasMatch := parseCodexSessionMetadata(path, f)
 		if hasMatch {
 			conversations = append(conversations, conv)
 		}
@@ -723,7 +754,7 @@ func runSQLiteJSON(sqlite3Path, dbPath, query string, dest any) error {
 	return json.Unmarshal(output, dest)
 }
 
-func discoverOpenCodeConversations(dbPath string, re *regexp.Regexp) ([]conversation, error) {
+func discoverOpenCodeConversations(dbPath string, f filter) ([]conversation, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -762,6 +793,7 @@ ORDER BY s.id, m.time_created, p.time_created`
 		conv         conversation
 		foundSummary bool
 		hasMatch     bool
+		hasExclude   bool
 	}
 	sessions := make(map[string]*sessionData)
 	var sessionOrder []string
@@ -787,8 +819,11 @@ ORDER BY s.id, m.time_created, p.time_created`
 			continue
 		}
 
-		if !sd.hasMatch && (re == nil || re.MatchString(row.Text)) {
+		if !sd.hasMatch && f.matches(row.Text) {
 			sd.hasMatch = true
+		}
+		if !sd.hasExclude && f.excludes(row.Text) {
+			sd.hasExclude = true
 		}
 
 		if !sd.foundSummary && row.Role == "user" {
@@ -803,7 +838,7 @@ ORDER BY s.id, m.time_created, p.time_created`
 	var conversations []conversation
 	for _, sid := range sessionOrder {
 		sd := sessions[sid]
-		if !sd.hasMatch {
+		if !sd.hasMatch || sd.hasExclude {
 			continue
 		}
 		if sd.conv.summary == "" {
@@ -991,12 +1026,12 @@ func parseTimestamp(raw string) time.Time {
 }
 
 // parseClaudeSessionMetadata parses a Claude Code session JSONL file.
-func parseClaudeSessionMetadata(filePath string, re *regexp.Regexp) (conversation, bool) {
-	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
+func parseClaudeSessionMetadata(filePath string, f filter) (conversation, bool) {
+	file, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
 	if err != nil {
 		return conversation{}, false
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = file.Close() }()
 
 	sessionID := strings.TrimSuffix(filepath.Base(filePath), ".jsonl")
 
@@ -1005,12 +1040,13 @@ func parseClaudeSessionMetadata(filePath string, re *regexp.Regexp) (conversatio
 	conv.provider = providerClaudeCode
 	conv.filePath = filePath
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line
 
 	var firstTimestamp, lastTimestamp time.Time
 	foundSummary := false
 	hasMatch := false
+	hasExclude := false
 
 	for scanner.Scan() {
 		var entry jsonlEntry
@@ -1037,9 +1073,11 @@ func parseClaudeSessionMetadata(filePath string, re *regexp.Regexp) (conversatio
 			if err := json.Unmarshal(entry.Message, &msg); err == nil {
 				text := extractText(msg.Content)
 
-				// check for search term match in message text
-				if !hasMatch && (re == nil || re.MatchString(text)) {
+				if !hasMatch && f.matches(text) {
 					hasMatch = true
+				}
+				if !hasExclude && f.excludes(text) {
+					hasExclude = true
 				}
 
 				// extract summary from first user message text block not starting with <
@@ -1060,28 +1098,29 @@ func parseClaudeSessionMetadata(filePath string, re *regexp.Regexp) (conversatio
 		conv.summary = "(no summary)"
 	}
 
-	return conv, hasMatch
+	return conv, hasMatch && !hasExclude
 }
 
 // parseCodexSessionMetadata parses a Codex session JSONL file.
-func parseCodexSessionMetadata(filePath string, re *regexp.Regexp) (conversation, bool) {
-	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
+func parseCodexSessionMetadata(filePath string, f filter) (conversation, bool) {
+	file, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
 	if err != nil {
 		return conversation{}, false
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = file.Close() }()
 
 	var conv conversation
 	conv.sessionID = strings.TrimSuffix(filepath.Base(filePath), ".jsonl")
 	conv.provider = providerCodex
 	conv.filePath = filePath
 
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line
 
 	var firstTimestamp, lastTimestamp time.Time
 	foundSummary := false
 	hasMatch := false
+	hasExclude := false
 
 	for scanner.Scan() {
 		var entry codexJSONLEntry
@@ -1122,8 +1161,11 @@ func parseCodexSessionMetadata(filePath string, re *regexp.Regexp) (conversation
 			}
 
 			text := extractText(payload.Content)
-			if !hasMatch && (re == nil || re.MatchString(text)) {
+			if !hasMatch && f.matches(text) {
 				hasMatch = true
+			}
+			if !hasExclude && f.excludes(text) {
+				hasExclude = true
 			}
 
 			if !foundSummary && payload.Role == "user" {
@@ -1142,7 +1184,7 @@ func parseCodexSessionMetadata(filePath string, re *regexp.Regexp) (conversation
 		conv.summary = "(no summary)"
 	}
 
-	return conv, hasMatch
+	return conv, hasMatch && !hasExclude
 }
 
 func loadPreview(conv conversation) []string {
@@ -1472,66 +1514,77 @@ func relativeTime(t time.Time) string {
 
 func main() {
 	var demo bool
-	var args []string
-	for _, arg := range os.Args[1:] {
-		switch arg {
-		case "--demo":
-			demo = true
-		case "-V", "--version":
-			fmt.Printf("jeeves %s\n", getVersion())
-			os.Exit(0)
-		default:
-			args = append(args, arg)
-		}
-	}
-	searchTerm := strings.Join(args, " ")
+	var version bool
+	var excludePattern string
 
-	p := tea.NewProgram(initialModel(searchTerm, demo))
-	result, err := p.Run()
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// check if we need to resume a conversation
-	var resumeSessionID, resumeCwd string
-	var resumeProvider sessionProvider
-	switch fm := result.(type) {
-	case model:
-		resumeSessionID = fm.resumeSessionID
-		resumeProvider = fm.resumeProvider
-		resumeCwd = fm.resumeCwd
-	case *model:
-		resumeSessionID = fm.resumeSessionID
-		resumeProvider = fm.resumeProvider
-		resumeCwd = fm.resumeCwd
-	}
-	if resumeSessionID != "" {
-		if resumeCwd != "" {
-			if err := os.Chdir(resumeCwd); err != nil {
-				_, _ = fmt.Fprintf(os.Stderr, "chdir to %s: %v\n", resumeCwd, err) //nolint:gosec // writing to stderr, not a web response
-				os.Exit(1)
+	rootCmd := &cobra.Command{
+		Use:                   "jeeves [flags] [search term]",
+		Short:                 "A TUI session browser for AI agent sessions",
+		Args:                  cobra.ArbitraryArgs,
+		DisableFlagsInUseLine: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			if version {
+				fmt.Printf("jeeves %s\n", getVersion())
+				return nil
 			}
-		}
-		binaryName := "claude"
-		command := []string{"claude", "--resume", resumeSessionID}
-		switch resumeProvider {
-		case providerCodex:
-			binaryName = "codex"
-			command = []string{"codex", "resume", resumeSessionID}
-		case providerOpenCode:
-			binaryName = "opencode"
-			command = []string{"opencode", "-s", resumeSessionID}
-		}
+			searchTerm := strings.Join(args, " ")
 
-		binary, err := exec.LookPath(binaryName)
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "%s not found: %v\n", binaryName, err)
-			os.Exit(1)
-		}
-		if err := syscall.Exec(binary, command, os.Environ()); err != nil { //nolint:gosec // intentional: exec into the selected agent CLI
-			_, _ = fmt.Fprintf(os.Stderr, "exec error: %v\n", err)
-			os.Exit(1)
-		}
+			p := tea.NewProgram(initialModel(searchTerm, excludePattern, demo))
+			result, err := p.Run()
+			if err != nil {
+				return err
+			}
+
+			// check if we need to resume a conversation
+			var resumeSessionID, resumeCwd string
+			var resumeProvider sessionProvider
+			switch fm := result.(type) {
+			case model:
+				resumeSessionID = fm.resumeSessionID
+				resumeProvider = fm.resumeProvider
+				resumeCwd = fm.resumeCwd
+			case *model:
+				resumeSessionID = fm.resumeSessionID
+				resumeProvider = fm.resumeProvider
+				resumeCwd = fm.resumeCwd
+			}
+			if resumeSessionID != "" {
+				if resumeCwd != "" {
+					if err := os.Chdir(resumeCwd); err != nil {
+						return fmt.Errorf("chdir to %s: %w", resumeCwd, err)
+					}
+				}
+				binaryName := "claude"
+				command := []string{"claude", "--resume", resumeSessionID}
+				switch resumeProvider {
+				case providerCodex:
+					binaryName = "codex"
+					command = []string{"codex", "resume", resumeSessionID}
+				case providerOpenCode:
+					binaryName = "opencode"
+					command = []string{"opencode", "-s", resumeSessionID}
+				}
+
+				binary, err := exec.LookPath(binaryName)
+				if err != nil {
+					return fmt.Errorf("%s not found: %w", binaryName, err)
+				}
+				if err := syscall.Exec(binary, command, os.Environ()); err != nil { //nolint:gosec // intentional: exec into the selected agent CLI
+					return fmt.Errorf("exec error: %w", err)
+				}
+			}
+			return nil
+		},
+	}
+
+	rootCmd.InitDefaultHelpFlag()
+	rootCmd.Flags().Lookup("help").Usage = "show help"
+
+	rootCmd.Flags().BoolVar(&demo, "demo", false, "enable demo mode (fake convos about dinosaurs)")
+	rootCmd.Flags().BoolVarP(&version, "version", "V", false, "print version and exit")
+	rootCmd.Flags().StringVar(&excludePattern, "exclude", "", "exclude conversations matching this regex pattern")
+
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
 	}
 }
