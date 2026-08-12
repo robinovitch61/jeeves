@@ -130,4 +130,4 @@ scoops:
     description: "A TUI for AI agent sessions."
     license: MIT
 gomod:
-  proxy: true
+  proxy: false

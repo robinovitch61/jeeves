@@ -2,6 +2,7 @@ jeeves
 *.log
 *.prof
 *.txt
+dist
 .DS_Store
 .claude
 .env
