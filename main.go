@@ -10,8 +10,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -46,6 +48,7 @@ const (
 	providerClaudeCode sessionProvider = "claude"
 	providerCodex      sessionProvider = "codex"
 	providerOpenCode   sessionProvider = "opencode"
+	providerPi         sessionProvider = "pi"
 )
 
 // conversation holds metadata about a single AI agent session
@@ -653,30 +656,53 @@ func searchCmd(searchTerm, excludePattern string) tea.Cmd {
 }
 
 func discoverConversations(homeDir string, f filter) ([]conversation, error) {
+	type result struct {
+		convs []conversation
+		err   error
+	}
+	ch := make(chan result, 4)
+
+	go func() {
+		convs, err := discoverClaudeConversations(filepath.Join(homeDir, ".claude", "projects"), f)
+		ch <- result{convs: convs, err: err}
+	}()
+	go func() {
+		convs, err := discoverCodexConversations(filepath.Join(homeDir, ".codex", "sessions"), f)
+		ch <- result{convs: convs, err: err}
+	}()
+	go func() {
+		convs, err := discoverOpenCodeConversations(filepath.Join(homeDir, ".local", "share", "opencode", "opencode.db"), f)
+		ch <- result{convs: convs, err: err}
+	}()
+	go func() {
+		convs, err := discoverPiConversations(filepath.Join(homeDir, ".pi", "agent", "sessions"), f)
+		ch <- result{convs: convs, err: err}
+	}()
+
 	var conversations []conversation
-
-	claudeConversations, err := discoverClaudeConversations(filepath.Join(homeDir, ".claude", "projects"), f)
-	if err != nil {
-		return nil, err
+	var firstErr error
+	for range 4 {
+		r := <-ch
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+		}
+		conversations = append(conversations, r.convs...)
 	}
-	conversations = append(conversations, claudeConversations...)
-
-	codexConversations, err := discoverCodexConversations(filepath.Join(homeDir, ".codex", "sessions"), f)
-	if err != nil {
-		return nil, err
+	if firstErr != nil {
+		return nil, firstErr
 	}
-	conversations = append(conversations, codexConversations...)
-
-	openCodeConversations, err := discoverOpenCodeConversations(filepath.Join(homeDir, ".local", "share", "opencode", "opencode.db"), f)
-	if err != nil {
-		return nil, err
-	}
-	conversations = append(conversations, openCodeConversations...)
-
 	return conversations, nil
 }
 
 func discoverClaudeConversations(projectsDir string, f filter) ([]conversation, error) {
+	paths, err := listClaudeSessionFiles(projectsDir)
+	if err != nil {
+		return nil, err
+	}
+	return parseSessionFiles(paths, f, parseClaudeSessionMetadata), nil
+}
+
+func listClaudeSessionFiles(projectsDir string) ([]string, error) {
 	projectEntries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -685,7 +711,7 @@ func discoverClaudeConversations(projectsDir string, f filter) ([]conversation, 
 		return nil, fmt.Errorf("reading claude projects dir: %w", err)
 	}
 
-	var conversations []conversation
+	var paths []string
 	for _, projEntry := range projectEntries {
 		if !projEntry.IsDir() {
 			continue
@@ -699,46 +725,99 @@ func discoverClaudeConversations(projectsDir string, f filter) ([]conversation, 
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 				continue
 			}
-			filePath := filepath.Join(projDir, entry.Name())
-			conv, hasMatch := parseClaudeSessionMetadata(filePath, f)
-			if !hasMatch {
-				continue
-			}
-			conversations = append(conversations, conv)
+			paths = append(paths, filepath.Join(projDir, entry.Name()))
 		}
 	}
-
-	return conversations, nil
+	return paths, nil
 }
 
 func discoverCodexConversations(sessionsDir string, f filter) ([]conversation, error) {
-	if _, err := os.Stat(sessionsDir); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("stat codex sessions dir: %w", err)
-	}
-
-	var conversations []conversation
-	err := filepath.WalkDir(sessionsDir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
-			return nil
-		}
-
-		conv, hasMatch := parseCodexSessionMetadata(path, f)
-		if hasMatch {
-			conversations = append(conversations, conv)
-		}
-		return nil
-	})
+	paths, err := listJSONLFiles(sessionsDir)
 	if err != nil {
 		return nil, fmt.Errorf("walking codex sessions dir: %w", err)
 	}
+	return parseSessionFiles(paths, f, parseCodexSessionMetadata), nil
+}
 
-	return conversations, nil
+func discoverPiConversations(sessionsDir string, f filter) ([]conversation, error) {
+	paths, err := listJSONLFiles(sessionsDir)
+	if err != nil {
+		return nil, fmt.Errorf("walking pi sessions dir: %w", err)
+	}
+	return parseSessionFiles(paths, f, parsePiSessionMetadata), nil
+}
+
+func listJSONLFiles(root string) ([]string, error) {
+	if _, err := os.Stat(root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".jsonl") {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	return paths, err
+}
+
+func parseSessionFiles(paths []string, f filter, parse func(string, filter) (conversation, bool)) []conversation {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+
+	jobs := make(chan string)
+	out := make(chan conversation, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				conv, ok := parse(path, f)
+				if ok {
+					out <- conv
+				}
+			}
+		}()
+	}
+
+	go func() {
+		for _, path := range paths {
+			jobs <- path
+		}
+		close(jobs)
+		wg.Wait()
+		close(out)
+	}()
+
+	var conversations []conversation
+	for conv := range out {
+		conversations = append(conversations, conv)
+	}
+	return conversations
+}
+
+func canStopScan(f filter, hasMatch, hasExclude, haveSummary bool) bool {
+	if hasExclude {
+		return true
+	}
+	if f.excludeRe != nil {
+		return false
+	}
+	return hasMatch && haveSummary
 }
 
 // runSQLiteJSON runs a sqlite3 query with -json output and unmarshals the result.
@@ -943,6 +1022,15 @@ type codexMessagePayload struct {
 	Content json.RawMessage `json:"content"`
 }
 
+type piJSONLEntry struct {
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	Timestamp string          `json:"timestamp"`
+	Cwd       string          `json:"cwd"`
+	Name      string          `json:"name"`
+	Message   json.RawMessage `json:"message,omitempty"`
+}
+
 type msgContent struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
@@ -1025,6 +1113,14 @@ func parseTimestamp(raw string) time.Time {
 	return t
 }
 
+func fileModTime(file *os.File, fallback time.Time) time.Time {
+	info, err := file.Stat()
+	if err != nil {
+		return fallback
+	}
+	return info.ModTime()
+}
+
 // parseClaudeSessionMetadata parses a Claude Code session JSONL file.
 func parseClaudeSessionMetadata(filePath string, f filter) (conversation, bool) {
 	file, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
@@ -1041,9 +1137,9 @@ func parseClaudeSessionMetadata(filePath string, f filter) (conversation, bool) 
 	conv.filePath = filePath
 
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
-	var firstTimestamp, lastTimestamp time.Time
+	var firstTimestamp time.Time
 	foundSummary := false
 	hasMatch := false
 	hasExclude := false
@@ -1054,20 +1150,14 @@ func parseClaudeSessionMetadata(filePath string, f filter) (conversation, bool) 
 			continue
 		}
 
-		// parse timestamp
-		if t := parseTimestamp(entry.Timestamp); !t.IsZero() {
-			if firstTimestamp.IsZero() {
-				firstTimestamp = t
-			}
-			lastTimestamp = t
+		if firstTimestamp.IsZero() {
+			firstTimestamp = parseTimestamp(entry.Timestamp)
 		}
 
-		// extract cwd
 		if conv.cwd == "" && entry.Cwd != "" {
 			conv.cwd = entry.Cwd
 		}
 
-		// only look at user/assistant messages
 		if (entry.Type == "user" || entry.Type == "assistant") && len(entry.Message) > 0 {
 			var msg msgContent
 			if err := json.Unmarshal(entry.Message, &msg); err == nil {
@@ -1080,7 +1170,6 @@ func parseClaudeSessionMetadata(filePath string, f filter) (conversation, bool) 
 					hasExclude = true
 				}
 
-				// extract summary from first user message text block not starting with <
 				if !foundSummary && msg.Role == "user" {
 					if s := extractSummary(msg.Content); s != "" {
 						conv.summary = truncate(s, 200)
@@ -1089,10 +1178,14 @@ func parseClaudeSessionMetadata(filePath string, f filter) (conversation, bool) 
 				}
 			}
 		}
+
+		if canStopScan(f, hasMatch, hasExclude, foundSummary) {
+			break
+		}
 	}
 
 	conv.startedAt = firstTimestamp
-	conv.modifiedAt = lastTimestamp
+	conv.modifiedAt = fileModTime(file, firstTimestamp)
 
 	if conv.summary == "" {
 		conv.summary = "(no summary)"
@@ -1115,9 +1208,9 @@ func parseCodexSessionMetadata(filePath string, f filter) (conversation, bool) {
 	conv.filePath = filePath
 
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
-	var firstTimestamp, lastTimestamp time.Time
+	var firstTimestamp time.Time
 	foundSummary := false
 	hasMatch := false
 	hasExclude := false
@@ -1128,11 +1221,8 @@ func parseCodexSessionMetadata(filePath string, f filter) (conversation, bool) {
 			continue
 		}
 
-		if t := parseTimestamp(entry.Timestamp); !t.IsZero() {
-			if firstTimestamp.IsZero() {
-				firstTimestamp = t
-			}
-			lastTimestamp = t
+		if firstTimestamp.IsZero() {
+			firstTimestamp = parseTimestamp(entry.Timestamp)
 		}
 
 		switch entry.Type {
@@ -1147,8 +1237,8 @@ func parseCodexSessionMetadata(filePath string, f filter) (conversation, bool) {
 			if conv.cwd == "" && payload.Cwd != "" {
 				conv.cwd = payload.Cwd
 			}
-			if t := parseTimestamp(payload.Timestamp); !t.IsZero() && firstTimestamp.IsZero() {
-				firstTimestamp = t
+			if firstTimestamp.IsZero() {
+				firstTimestamp = parseTimestamp(payload.Timestamp)
 			}
 
 		case "response_item":
@@ -1175,10 +1265,114 @@ func parseCodexSessionMetadata(filePath string, f filter) (conversation, bool) {
 				}
 			}
 		}
+
+		if canStopScan(f, hasMatch, hasExclude, foundSummary) {
+			break
+		}
 	}
 
 	conv.startedAt = firstTimestamp
-	conv.modifiedAt = lastTimestamp
+	conv.modifiedAt = fileModTime(file, firstTimestamp)
+
+	if conv.summary == "" {
+		conv.summary = "(no summary)"
+	}
+
+	return conv, hasMatch && !hasExclude
+}
+
+// parsePiSessionMetadata parses a Pi session JSONL file.
+func parsePiSessionMetadata(filePath string, f filter) (conversation, bool) {
+	file, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
+	if err != nil {
+		return conversation{}, false
+	}
+	defer func() { _ = file.Close() }()
+
+	var conv conversation
+	conv.sessionID = strings.TrimSuffix(filepath.Base(filePath), ".jsonl")
+	if idx := strings.LastIndex(conv.sessionID, "_"); idx >= 0 && idx+1 < len(conv.sessionID) {
+		conv.sessionID = conv.sessionID[idx+1:]
+	}
+	conv.provider = providerPi
+	conv.filePath = filePath
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	var firstTimestamp time.Time
+	foundNamedSummary := false
+	foundSummary := false
+	hasMatch := false
+	hasExclude := false
+
+	for scanner.Scan() {
+		var entry piJSONLEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+
+		if firstTimestamp.IsZero() {
+			firstTimestamp = parseTimestamp(entry.Timestamp)
+		}
+
+		switch entry.Type {
+		case "session":
+			if entry.ID != "" {
+				conv.sessionID = entry.ID
+			}
+			if conv.cwd == "" && entry.Cwd != "" {
+				conv.cwd = entry.Cwd
+			}
+
+		case "session_info":
+			if entry.Name == "" {
+				continue
+			}
+			conv.summary = truncate(entry.Name, 200)
+			foundNamedSummary = true
+			if !hasMatch && f.matches(entry.Name) {
+				hasMatch = true
+			}
+			if !hasExclude && f.excludes(entry.Name) {
+				hasExclude = true
+			}
+
+		case "message":
+			if len(entry.Message) == 0 {
+				continue
+			}
+			var msg msgContent
+			if err := json.Unmarshal(entry.Message, &msg); err != nil {
+				continue
+			}
+			if msg.Role != "user" && msg.Role != "assistant" {
+				continue
+			}
+
+			text := extractText(msg.Content)
+			if !hasMatch && f.matches(text) {
+				hasMatch = true
+			}
+			if !hasExclude && f.excludes(text) {
+				hasExclude = true
+			}
+
+			if !foundNamedSummary && !foundSummary && msg.Role == "user" {
+				if s := extractSummary(msg.Content); s != "" {
+					conv.summary = truncate(s, 200)
+					foundSummary = true
+				}
+			}
+		}
+
+		if canStopScan(f, hasMatch, hasExclude, foundNamedSummary || foundSummary) {
+			break
+		}
+	}
+
+	conv.startedAt = firstTimestamp
+	conv.modifiedAt = fileModTime(file, firstTimestamp)
 
 	if conv.summary == "" {
 		conv.summary = "(no summary)"
@@ -1220,6 +1414,8 @@ func parseMessages(conv conversation, lastN int) []parsedMessage {
 		return parseCodexMessages(conv.filePath, lastN)
 	case providerOpenCode:
 		return parseOpenCodeMessages(conv.filePath, conv.sessionID, lastN)
+	case providerPi:
+		return parsePiMessages(conv.filePath, lastN)
 	default:
 		return parseClaudeMessages(conv.filePath, lastN)
 	}
@@ -1309,6 +1505,53 @@ func parseCodexMessages(filePath string, lastN int) []parsedMessage {
 
 		messages = append(messages, parsedMessage{
 			role: payload.Role,
+			text: text,
+		})
+	}
+
+	if lastN > 0 && len(messages) > lastN {
+		messages = messages[len(messages)-lastN:]
+	}
+
+	return messages
+}
+
+func parsePiMessages(filePath string, lastN int) []parsedMessage {
+	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	var messages []parsedMessage
+
+	for scanner.Scan() {
+		var entry piJSONLEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		if entry.Type != "message" || len(entry.Message) == 0 {
+			continue
+		}
+
+		var msg msgContent
+		if err := json.Unmarshal(entry.Message, &msg); err != nil {
+			continue
+		}
+		if msg.Role != "user" && msg.Role != "assistant" {
+			continue
+		}
+
+		text := extractText(msg.Content)
+		if text == "" {
+			continue
+		}
+
+		messages = append(messages, parsedMessage{
+			role: msg.Role,
 			text: text,
 		})
 	}
@@ -1476,6 +1719,8 @@ func providerLabel(provider sessionProvider) string {
 		return "[codex]"
 	case providerOpenCode:
 		return "[opencode]"
+	case providerPi:
+		return "[pi]"
 	default:
 		return "[demo]"
 	}
@@ -1563,6 +1808,9 @@ func main() {
 				case providerOpenCode:
 					binaryName = "opencode"
 					command = []string{"opencode", "-s", resumeSessionID}
+				case providerPi:
+					binaryName = "pi"
+					command = []string{"pi", "--session", resumeSessionID}
 				}
 
 				binary, err := exec.LookPath(binaryName)
