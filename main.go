@@ -49,6 +49,7 @@ const (
 	providerCodex      sessionProvider = "codex"
 	providerOpenCode   sessionProvider = "opencode"
 	providerPi         sessionProvider = "pi"
+	providerGrok       sessionProvider = "grok"
 )
 
 // conversation holds metadata about a single AI agent session
@@ -660,7 +661,7 @@ func discoverConversations(homeDir string, f filter) ([]conversation, error) {
 		convs []conversation
 		err   error
 	}
-	ch := make(chan result, 4)
+	ch := make(chan result, 5)
 
 	go func() {
 		convs, err := discoverClaudeConversations(filepath.Join(homeDir, ".claude", "projects"), f)
@@ -678,10 +679,14 @@ func discoverConversations(homeDir string, f filter) ([]conversation, error) {
 		convs, err := discoverPiConversations(filepath.Join(homeDir, ".pi", "agent", "sessions"), f)
 		ch <- result{convs: convs, err: err}
 	}()
+	go func() {
+		convs, err := discoverGrokConversations(filepath.Join(homeDir, ".grok", "sessions"), f)
+		ch <- result{convs: convs, err: err}
+	}()
 
 	var conversations []conversation
 	var firstErr error
-	for range 4 {
+	for range 5 {
 		r := <-ch
 		if r.err != nil && firstErr == nil {
 			firstErr = r.err
@@ -745,6 +750,35 @@ func discoverPiConversations(sessionsDir string, f filter) ([]conversation, erro
 		return nil, fmt.Errorf("walking pi sessions dir: %w", err)
 	}
 	return parseSessionFiles(paths, f, parsePiSessionMetadata), nil
+}
+
+func discoverGrokConversations(sessionsDir string, f filter) ([]conversation, error) {
+	paths, err := listGrokSummaryFiles(sessionsDir)
+	if err != nil {
+		return nil, fmt.Errorf("walking grok sessions dir: %w", err)
+	}
+	return parseSessionFiles(paths, f, parseGrokSessionMetadata), nil
+}
+
+func listGrokSummaryFiles(root string) ([]string, error) {
+	if _, err := os.Stat(root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() && d.Name() == "summary.json" {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	return paths, err
 }
 
 func listJSONLFiles(root string) ([]string, error) {
@@ -1029,6 +1063,22 @@ type piJSONLEntry struct {
 	Cwd       string          `json:"cwd"`
 	Name      string          `json:"name"`
 	Message   json.RawMessage `json:"message,omitempty"`
+}
+
+type grokSummaryFile struct {
+	Info struct {
+		ID  string `json:"id"`
+		Cwd string `json:"cwd"`
+	} `json:"info"`
+	SessionSummary string `json:"session_summary"`
+	GeneratedTitle string `json:"generated_title"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+type grokChatLine struct {
+	Type    string          `json:"type"`
+	Content json.RawMessage `json:"content"`
 }
 
 type msgContent struct {
@@ -1381,6 +1431,69 @@ func parsePiSessionMetadata(filePath string, f filter) (conversation, bool) {
 	return conv, hasMatch && !hasExclude
 }
 
+func parseGrokSessionMetadata(summaryPath string, f filter) (conversation, bool) {
+	data, err := os.ReadFile(summaryPath) //nolint:gosec // intentional user-provided file path
+	if err != nil {
+		return conversation{}, false
+	}
+
+	var summary grokSummaryFile
+	if err := json.Unmarshal(data, &summary); err != nil {
+		return conversation{}, false
+	}
+
+	sessionDir := filepath.Dir(summaryPath)
+	var conv conversation
+	conv.sessionID = summary.Info.ID
+	if conv.sessionID == "" {
+		conv.sessionID = filepath.Base(sessionDir)
+	}
+	conv.provider = providerGrok
+	conv.cwd = summary.Info.Cwd
+	conv.filePath = filepath.Join(sessionDir, "chat_history.jsonl")
+	conv.startedAt = parseTimestamp(summary.CreatedAt)
+	conv.modifiedAt = parseTimestamp(summary.UpdatedAt)
+	if conv.modifiedAt.IsZero() {
+		if info, statErr := os.Stat(summaryPath); statErr == nil {
+			conv.modifiedAt = info.ModTime()
+		} else {
+			conv.modifiedAt = conv.startedAt
+		}
+	}
+	conv.summary = summary.GeneratedTitle
+	if conv.summary == "" {
+		conv.summary = summary.SessionSummary
+	}
+
+	hasMatch := f.matches(conv.summary)
+	hasExclude := f.excludes(conv.summary)
+	haveSummary := conv.summary != ""
+
+	if !canStopScan(f, hasMatch, hasExclude, haveSummary) {
+		for _, msg := range parseGrokMessages(conv.filePath, 0) {
+			if !hasMatch && f.matches(msg.text) {
+				hasMatch = true
+			}
+			if !hasExclude && f.excludes(msg.text) {
+				hasExclude = true
+			}
+			if !haveSummary && msg.role == "user" {
+				conv.summary = truncate(firstLine(msg.text), 200)
+				haveSummary = conv.summary != ""
+			}
+			if canStopScan(f, hasMatch, hasExclude, haveSummary) {
+				break
+			}
+		}
+	}
+
+	if conv.summary == "" {
+		conv.summary = "(no summary)"
+	}
+
+	return conv, hasMatch && !hasExclude
+}
+
 func loadPreview(conv conversation) []string {
 	msgs := conv.demoMessages
 	if msgs == nil {
@@ -1416,6 +1529,8 @@ func parseMessages(conv conversation, lastN int) []parsedMessage {
 		return parseOpenCodeMessages(conv.filePath, conv.sessionID, lastN)
 	case providerPi:
 		return parsePiMessages(conv.filePath, lastN)
+	case providerGrok:
+		return parseGrokMessages(conv.filePath, lastN)
 	default:
 		return parseClaudeMessages(conv.filePath, lastN)
 	}
@@ -1561,6 +1676,54 @@ func parsePiMessages(filePath string, lastN int) []parsedMessage {
 	}
 
 	return messages
+}
+
+func parseGrokMessages(filePath string, lastN int) []parsedMessage {
+	f, err := os.Open(filePath) //nolint:gosec // intentional user-provided file path
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	var messages []parsedMessage
+	for scanner.Scan() {
+		var line grokChatLine
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			continue
+		}
+		if line.Type != "user" && line.Type != "assistant" {
+			continue
+		}
+		text := grokVisibleText(extractText(line.Content))
+		if text == "" {
+			continue
+		}
+		messages = append(messages, parsedMessage{role: line.Type, text: text})
+	}
+
+	if lastN > 0 && len(messages) > lastN {
+		messages = messages[len(messages)-lastN:]
+	}
+	return messages
+}
+
+func grokVisibleText(text string) string {
+	const startTag = "<user_query>"
+	const endTag = "</user_query>"
+	if i := strings.Index(text, startTag); i >= 0 {
+		text = text[i+len(startTag):]
+		if j := strings.Index(text, endTag); j >= 0 {
+			text = text[:j]
+		}
+		return strings.TrimSpace(text)
+	}
+	if strings.HasPrefix(strings.TrimSpace(text), "<") {
+		return ""
+	}
+	return text
 }
 
 func formatMessages(messages []parsedMessage) []string {
@@ -1721,6 +1884,8 @@ func providerLabel(provider sessionProvider) string {
 		return "[opencode]"
 	case providerPi:
 		return "[pi]"
+	case providerGrok:
+		return "[grok]"
 	default:
 		return "[demo]"
 	}
@@ -1811,6 +1976,9 @@ func main() {
 				case providerPi:
 					binaryName = "pi"
 					command = []string{"pi", "--session", resumeSessionID}
+				case providerGrok:
+					binaryName = "grok"
+					command = []string{"grok", "--resume", resumeSessionID}
 				}
 
 				binary, err := exec.LookPath(binaryName)

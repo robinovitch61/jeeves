@@ -66,7 +66,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-005",
-		provider:  providerOpenCode,
+		provider:  providerGrok,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-7 * 24 * time.Hour),
 		messages: []parsedMessage{
@@ -122,7 +122,7 @@ var demoConversations = []demoConversation{
 	},
 	{
 		sessionID: "dino-010",
-		provider:  providerOpenCode,
+		provider:  providerGrok,
 		cwd:       "~/dinos",
 		startedAt: time.Now().Add(-2 * 24 * time.Hour),
 		messages: []parsedMessage{
