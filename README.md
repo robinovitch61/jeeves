@@ -39,6 +39,7 @@ jeeves "fix.*bug"
 | /         | filter sessions           |
 | j/k       | navigate up/down          |
 | w         | toggle line wrap          |
+| ctrl+s    | save open conversation    |
 | esc       | back to list              |
 | q/ctrl+c  | quit                      |
 

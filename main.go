@@ -129,6 +129,10 @@ var appKeyMap = appKeys{
 
 var viewportKeyMap = viewport.DefaultKeyMap()
 var filterableViewportKeyMap = filterableviewport.DefaultKeyMap()
+var saveKey = key.NewBinding(
+	key.WithKeys("ctrl+s"),
+	key.WithHelp("ctrl+s", "save"),
+)
 
 // styles
 var (
@@ -494,12 +498,17 @@ func (m model) initViewports() model {
 	m.previewVP.SetSelectionEnabled(false)
 
 	// fullscreen pane
+	saveDir, err := os.Getwd()
+	if err != nil {
+		saveDir = "."
+	}
 	fullVP := viewport.New[contentLine](
 		m.width,
 		m.height,
 		viewport.WithKeyMap[contentLine](viewportKeyMap),
 		viewport.WithStyles[contentLine](viewport.DefaultStyles()),
 		viewport.WithProgressBarEnabled[contentLine](true),
+		viewport.WithFileSaving[contentLine](saveDir, saveKey),
 	)
 	m.fullFV = filterableviewport.New[contentLine](
 		fullVP,
