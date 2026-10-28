@@ -333,7 +333,7 @@ func (m model) updateListMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	m.listFV, cmd = m.listFV.Update(msg)
 	cmds = append(cmds, cmd)
-	m.checkSelectionChanged()
+	m = m.checkSelectionChanged()
 	return m, tea.Batch(cmds...)
 }
 
